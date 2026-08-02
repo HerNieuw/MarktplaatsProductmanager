@@ -34,7 +34,7 @@ COLUMNS = [
     "titel",               # B (1)  - ook gebruikt door auto_marktplaats.py
     "categorie",            # C (2)  - ook gebruikt door auto_marktplaats.py
     "omschrijving",          # D (3)  - ook gebruikt door auto_marktplaats.py
-    "reserve",                # E (4)  - vrij
+    "online",                 # E (4)  - "ja"/"nee", was "reserve"
     "lengte",                  # F (5)  - ook gebruikt door auto_marktplaats.py
     "breedte",                  # G (6)  - ook gebruikt door auto_marktplaats.py
     "hoogte",                     # H (7)  - ook gebruikt door auto_marktplaats.py
@@ -43,17 +43,18 @@ COLUMNS = [
     "staat_details",                 # K (10) - ook gebruikt door auto_marktplaats.py (als "Schades")
     "waarde_min",                     # L (11) - ook gebruikt door auto_marktplaats.py (als "Waarde")
     "waarde_max",                      # M (12) - ook gebruikt door auto_marktplaats.py (waarde-extra)
-    "vraagprijs",                       # N (13) - nieuw
-    "aanmaakdatum",                      # O (14) - nieuw
-    "tijdsperiode",                       # P (15) - nieuw
-    "opslaglocatie",                       # Q (16) - nieuw
-    "sublocatie",                           # R (17) - nieuw
-    "rij",                                   # S (18) - nieuw
-    "folder_locatie",                         # T (19) - nieuw
-    "verkocht",                                 # U (20) - nieuw ("ja"/"nee")
-    "verkoopprijs",                              # V (21) - nieuw
-    "verkoopdatum",                               # W (22) - nieuw
+    "vraagprijs",                       # N (13)
+    "aanmaakdatum",                      # O (14)
+    "tijdsperiode",                       # P (15)
+    "opslaglocatie",                       # Q (16)
+    "sublocatie",                           # R (17)
+    "rij",                                   # S (18)
+    "folder_locatie",                         # T (19)
+    "verkocht",                                 # U (20) - "ja"/"nee"
+    "verkoopprijs",                              # V (21)
+    "verkoopdatum",                               # W (22)
     "algemene_voorwaarden",                        # X (23) - ook gebruikt door auto_marktplaats.py
+    "advertentie_url",                              # Y (24) - nieuw, alleen ingevuld als online=ja
 ]
 COL = {name: idx for idx, name in enumerate(COLUMNS)}
 
@@ -153,7 +154,19 @@ class ConfigManager:
         "volgnummers": {},  # {prefix: laatst_gebruikte_nummer}
         "printer": {
             "enabled": False,
+            "print_method": "cups",
             "printer_name": "",
+            "brother_ql_model": "QL-500",
+            "brother_ql_label": "62",
+            "brother_ql_identifier": "",
+        },
+        "barcode": {
+            # Afgestemd op 62mm continue labelrol (bv. Brother QL-serie).
+            # Pas gerust aan en test opnieuw - dit bepaalt hoe breed/hoog
+            # de barcode wordt EN hoeveel label er wordt "uitgespuugd".
+            "module_width_mm": 0.4,   # dikte van elke streep - hoger = breder totaal + beter leesbaar
+            "module_height_mm": 7.0,  # hoogte van de streepjes zelf (python-barcode default is 15mm)
+            "quiet_zone_mm": 2.0,     # witruimte links/rechts (kleiner = meer van de 62mm benut)
         },
     }
 
@@ -336,9 +349,16 @@ def get_backend(config):
 # HELPERS: artikelnummer, map, txt, barcode
 # ============================================
 def generate_artikelnummer(config, storage, opslaglocatie_code, sublocatie_code, rij_code):
+    """Bouwt het artikelnummer op als: locatie-prefix(3) + dag+maand(4) + volgnummer(2).
+    Bijv. A51 + 0108 (1 augustus) + 03 = A51010803.
+    Het volgnummer (01-99) telt per locatie-prefix EN per dag - begint dus
+    elke dag vanzelf weer bij 01, ook voor dezelfde locatie."""
     prefix = f"{opslaglocatie_code}{sublocatie_code}{rij_code}"
+    datum_deel = datetime.date.today().strftime("%d%m")  # DDMM, 4 cijfers
+    teller_sleutel = f"{prefix}{datum_deel}"
+    
     volgnummers = config.get("volgnummers", {})
-    laatste = volgnummers.get(prefix, 0)
+    laatste = volgnummers.get(teller_sleutel, 0)
     
     # Kruis-check met bestaande data, voor het geval de teller (config.json)
     # niet meer synchroon loopt met de opslag (bv. na handmatige XML-edit
@@ -347,9 +367,9 @@ def generate_artikelnummer(config, storage, opslaglocatie_code, sublocatie_code,
         bestaande = storage.load_products()
         for p in bestaande:
             nr = p.get("artikelnummer", "")
-            if nr.startswith(prefix) and len(nr) == len(prefix) + 4:
+            if nr.startswith(teller_sleutel) and len(nr) == len(teller_sleutel) + 2:
                 try:
-                    val = int(nr[len(prefix):])
+                    val = int(nr[len(teller_sleutel):])
                     laatste = max(laatste, val)
                 except ValueError:
                     pass
@@ -357,49 +377,63 @@ def generate_artikelnummer(config, storage, opslaglocatie_code, sublocatie_code,
         pass
     
     nieuw_nummer = laatste + 1
-    volgnummers[prefix] = nieuw_nummer
+    if nieuw_nummer > 99:
+        raise ValueError(
+            f"Maximaal 99 artikelen per dag bereikt voor locatie '{prefix}' op {datum_deel}."
+        )
+    volgnummers[teller_sleutel] = nieuw_nummer
     config.set("volgnummers", volgnummers)
     
-    return f"{prefix}{nieuw_nummer:04d}"
+    return f"{teller_sleutel}{nieuw_nummer:02d}"
 
 
 def build_txt_beschrijving(product):
-    """Genereert de .txt-omschrijving in het mapje van het artikelnummer,
-    naar het voorbeeld van omschrijving.txt."""
-    lines = []
-    lines.append(product.get("titel", ""))
-    lines.append("")
-    lines.append("Beschrijving")
-    lines.append("")
-    lines.append(product.get("omschrijving", ""))
-    lines.append("")
-    lines.append("Specificaties")
-    lines.append("")
-    lines.append(f"- Categorie: {product.get('categorie', '')}")
-    lines.append(f"- Tijdsperiode: {product.get('tijdsperiode', '')}")
-    lines.append(f"- Conditie: {product.get('conditie', '')}")
-    if product.get("staat_details"):
-        lines.append(f"- Staat details: {product.get('staat_details', '')}")
-    lines.append("")
-    lines.append("Details")
-    lines.append("")
+    """Genereert omschrijving.txt in het mapje van het artikelnummer.
+    Dit is BEWUST exact hetzelfde formaat als de advertentietekst die
+    auto_marktplaats.py plaatst (zie build_description() daar) - deze
+    .txt is de enige plek waar de opmaak wordt beheerd; auto_marktplaats.py
+    leest 'm rechtstreeks in plaats van de tekst zelf opnieuw op te bouwen."""
+    parts = []
+    
+    titel = product.get("titel", "")
+    if titel:
+        parts.append(titel)
+    
+    omschrijving = product.get("omschrijving", "")
+    if omschrijving:
+        parts.append(omschrijving)
+    
+    specs = []
     lengte = product.get("lengte", "")
     breedte = product.get("breedte", "")
     hoogte = product.get("hoogte", "")
-    if lengte or breedte or hoogte:
-        lines.append(f"- Afmetingen (LxBxH): {lengte} x {breedte} x {hoogte} cm")
-    if product.get("gewicht"):
-        lines.append(f"- Gewicht: {product.get('gewicht')} kg")
-    if product.get("waarde_min") or product.get("waarde_max"):
-        lines.append(f"- Geschatte waarde: €{product.get('waarde_min', '')} - €{product.get('waarde_max', '')}")
-    if product.get("vraagprijs"):
-        lines.append(f"- Vraagprijs: €{product.get('vraagprijs')}")
-    lines.append(f"- Artikelcode: {product.get('artikelnummer', '')}")
-    lines.append("")
-    lines.append("Algemene voorwaarden")
-    lines.append("")
-    lines.append(ALGEMENE_VOORWAARDEN.replace("Algemene voorwaarden: \n", ""))
-    return "\n".join(lines)
+    gewicht = product.get("gewicht", "")
+    if lengte or breedte or hoogte or gewicht:
+        dims = [f"{x}cm" for x in (lengte, breedte, hoogte) if x]
+        line = f"* Afmeting (LxBxH & G): {' x '.join(dims)}"
+        if gewicht:
+            line += f" & {gewicht} kg"
+        specs.append(line)
+    if product.get("conditie"):
+        specs.append(f"* Conditie/Staat: {product.get('conditie')}")
+    if product.get("staat_details"):
+        specs.append(f"* Schades: {product.get('staat_details')}")
+    waarde_min = product.get("waarde_min", "")
+    waarde_max = product.get("waarde_max", "")
+    if waarde_min:
+        line = f"* Waarde: {waarde_min}"
+        if waarde_max:
+            line += f" ~{waarde_max}"
+        specs.append(line)
+    if product.get("artikelnummer"):
+        specs.append(f"* Artikelnummer: {product.get('artikelnummer')}")
+    if specs:
+        parts.append("\n".join(specs))
+    
+    voorwaarden = product.get("algemene_voorwaarden") or ALGEMENE_VOORWAARDEN
+    parts.append(voorwaarden)
+    
+    return "\n\n".join(parts)
 
 
 def maak_product_map(config, product):
@@ -419,25 +453,65 @@ def maak_product_map(config, product):
     return folder, bestond_al
 
 
-def genereer_barcode(artikelnummer, output_folder):
+def genereer_barcode(artikelnummer, output_folder, barcode_config=None):
     """Genereert een Code128-barcode-afbeelding met het artikelnummer.
     Vereist: pip install python-barcode"""
     try:
         import barcode
         from barcode.writer import ImageWriter
+        from PIL import Image as PILImage
     except ImportError:
         raise RuntimeError(
             "python-barcode is niet geïnstalleerd. Installeer met:\n"
             "pip install python-barcode --break-system-packages"
         )
+    
+    # Compatibiliteits-fix: Pillow 10+ heeft Image.ANTIALIAS verwijderd
+    # (vervangen door Image.LANCZOS), maar python-barcode's ImageWriter
+    # verwijst er intern nog naar. Zonder deze patch crasht het genereren
+    # met "module 'PIL.Image' has no attribute 'ANTIALIAS'".
+    if not hasattr(PILImage, "ANTIALIAS"):
+        PILImage.ANTIALIAS = PILImage.LANCZOS
+    
+    barcode_config = barcode_config or {}
+    writer_options = {
+        "module_width": barcode_config.get("module_width_mm", 0.4),
+        "module_height": barcode_config.get("module_height_mm", 7.0),
+        "quiet_zone": barcode_config.get("quiet_zone_mm", 2.0),
+        "font_size": 8,
+        "text_distance": 3.0,
+        "dpi": 300,
+    }
     code128 = barcode.get("code128", artikelnummer, writer=ImageWriter())
     output_path = os.path.join(output_folder, f"{artikelnummer}_barcode")
-    saved_path = code128.save(output_path)
+    saved_path = code128.save(output_path, options=writer_options)
     return saved_path
 
 
-def print_barcode(image_path, printer_name):
-    """Print de barcode-afbeelding direct via CUPS (lp-commando, Linux)."""
+def print_barcode(image_path, printer_config):
+    """Print de barcode-afbeelding.
+    
+    Twee methoden:
+    - 'brother_ql': praat rechtstreeks (via USB) met een Brother QL-serie
+      printer met de brother_ql-library. Dit is de juiste aanpak voor een
+      continue labelrol: de library berekent zelf de correcte labellengte
+      op basis van de afbeelding, in plaats van te leunen op een vaste
+      paginagrootte uit een CUPS-driver (wat foutmeldingen/knipperen kan
+      geven als de gevraagde afmeting niet in de driver's vaste lijst zit).
+    - 'cups': gewone lp-print, GEEN custom paginagrootte (dat gaf eerder
+      een media-mismatch-fout op de QL-500). Werkt op de meeste
+      printers, maar de labellengte is dan afhankelijk van de standaard-
+      pagina-instelling van de driver.
+    """
+    methode = printer_config.get("print_method", "cups")
+    
+    if methode == "brother_ql":
+        _print_barcode_brother_ql(image_path, printer_config)
+    else:
+        _print_barcode_cups(image_path, printer_config.get("printer_name", ""))
+
+
+def _print_barcode_cups(image_path, printer_name):
     cmd = ["lp"]
     if printer_name:
         cmd += ["-d", printer_name]
@@ -445,6 +519,44 @@ def print_barcode(image_path, printer_name):
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode("utf-8", errors="ignore"))
+
+
+def _print_barcode_brother_ql(image_path, printer_config):
+    try:
+        from brother_ql.conversion import convert
+        from brother_ql.backends.helpers import send
+        from brother_ql.raster import BrotherQLRaster
+    except ImportError:
+        raise RuntimeError(
+            "brother_ql is niet geïnstalleerd. Installeer met:\n"
+            "pip install brother_ql --break-system-packages"
+        )
+    
+    model = printer_config.get("brother_ql_model", "QL-500")
+    label_size = printer_config.get("brother_ql_label", "62")  # 62mm continu
+    identifier = printer_config.get("brother_ql_identifier", "")
+    if not identifier:
+        raise RuntimeError(
+            "Geen USB-identifier ingesteld voor brother_ql.\n"
+            "Vind 'm met: python3 -m brother_ql discover"
+        )
+    
+    from PIL import Image
+    with Image.open(image_path) as img:
+        qlr = BrotherQLRaster(model)
+        qlr.exception_on_warning = True
+        instructions = convert(
+            qlr=qlr,
+            images=[img],
+            label=label_size,
+            rotate="0",
+            threshold=70.0,
+            dither=False,
+            compress=False,
+            red=False,
+            cut=True,
+        )
+        send(instructions=instructions, printer_identifier=identifier, backend_identifier="pyusb", blocking=True)
 
 
 def get_cups_printers():
@@ -590,7 +702,7 @@ class SettingsDialog(Gtk.Dialog):
         # --- Labelprinter ---
         inner.pack_start(self._section_label("Labelprinter (barcode)"), False, False, 0)
         printer_hint = Gtk.Label()
-        printer_hint.set_markup("<small><i>Indien uitgeschakeld wordt alleen een barcode-afbeelding opgeslagen in de productmap. Indien ingeschakeld wordt direct geprint via CUPS.</i></small>")
+        printer_hint.set_markup("<small><i>Indien uitgeschakeld wordt alleen een barcode-afbeelding opgeslagen in de productmap.</i></small>")
         printer_hint.set_xalign(0)
         printer_hint.set_line_wrap(True)
         inner.pack_start(printer_hint, False, False, 0)
@@ -599,12 +711,28 @@ class SettingsDialog(Gtk.Dialog):
         self.printer_enabled_check.set_active(config.get("printer", {}).get("enabled", False))
         inner.pack_start(self.printer_enabled_check, False, False, 0)
         
+        printer_cfg = config.get("printer", {})
+        
+        method_row = Gtk.Box(spacing=5)
+        method_row.pack_start(Gtk.Label(label="Methode:"), False, False, 0)
+        self.print_method_combo = Gtk.ComboBoxText()
+        self.print_method_combo.append("cups", "CUPS (lp) - algemeen")
+        self.print_method_combo.append("brother_ql", "Brother QL direct via USB (brother_ql)")
+        self.print_method_combo.set_active_id(printer_cfg.get("print_method", "cups"))
+        self.print_method_combo.connect("changed", self._on_print_method_changed)
+        method_row.pack_start(self.print_method_combo, False, False, 0)
+        inner.pack_start(method_row, False, False, 0)
+        
+        # CUPS-specifieke velden
+        self.cups_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        inner.pack_start(self.cups_box, False, False, 0)
+        
         printer_row = Gtk.Box(spacing=5)
         printer_row.pack_start(Gtk.Label(label="Printer:"), False, False, 0)
         self.printer_combo = Gtk.ComboBoxText()
         for p in get_cups_printers():
             self.printer_combo.append_text(p)
-        huidige_printer = config.get("printer", {}).get("printer_name", "")
+        huidige_printer = printer_cfg.get("printer_name", "")
         if huidige_printer:
             self.printer_combo.prepend_text(huidige_printer)
         self.printer_combo.set_active(0)
@@ -614,9 +742,132 @@ class SettingsDialog(Gtk.Dialog):
         refresh_btn.connect("clicked", self._refresh_printers)
         printer_row.pack_start(refresh_btn, False, False, 0)
         
-        inner.pack_start(printer_row, False, False, 0)
+        self.cups_box.pack_start(printer_row, False, False, 0)
+        cups_hint = Gtk.Label()
+        cups_hint.set_markup("<small><i>⚠️ Op de QL-500 gaf een aangepaste paginagrootte een media-mismatch-fout (snel knipperend lampje). Gebruik hiervoor liever de brother_ql-methode hieronder.</i></small>")
+        cups_hint.set_xalign(0)
+        cups_hint.set_line_wrap(True)
+        self.cups_box.pack_start(cups_hint, False, False, 0)
+        
+        # brother_ql-specifieke velden
+        self.brother_ql_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        inner.pack_start(self.brother_ql_box, False, False, 0)
+        
+        bq_grid = Gtk.Grid()
+        bq_grid.set_column_spacing(10)
+        bq_grid.set_row_spacing(5)
+        self.brother_ql_box.pack_start(bq_grid, False, False, 0)
+        
+        bq_grid.attach(Gtk.Label(label="Model:", xalign=0), 0, 0, 1, 1)
+        self.bq_model_entry = Gtk.Entry()
+        self.bq_model_entry.set_text(printer_cfg.get("brother_ql_model", "QL-500"))
+        bq_grid.attach(self.bq_model_entry, 1, 0, 1, 1)
+        
+        bq_grid.attach(Gtk.Label(label="Labelformaat:", xalign=0), 0, 1, 1, 1)
+        self.bq_label_entry = Gtk.Entry()
+        self.bq_label_entry.set_text(printer_cfg.get("brother_ql_label", "62"))
+        bq_grid.attach(self.bq_label_entry, 1, 1, 1, 1)
+        bq_label_hint = Gtk.Label()
+        bq_label_hint.set_markup("<small><i>'62' = 62mm continue rol</i></small>")
+        bq_label_hint.set_xalign(0)
+        bq_grid.attach(bq_label_hint, 2, 1, 1, 1)
+        
+        bq_grid.attach(Gtk.Label(label="USB-identifier:", xalign=0), 0, 2, 1, 1)
+        self.bq_identifier_entry = Gtk.Entry()
+        self.bq_identifier_entry.set_text(printer_cfg.get("brother_ql_identifier", ""))
+        self.bq_identifier_entry.set_placeholder_text("bijv. usb://0x04f9:0x2015/000M6Z401370")
+        bq_grid.attach(self.bq_identifier_entry, 1, 2, 1, 1)
+        
+        bq_find_btn = Gtk.Button(label="🔍 Zoek printer")
+        bq_find_btn.connect("clicked", self._discover_brother_ql)
+        self.brother_ql_box.pack_start(bq_find_btn, False, False, 0)
+        
+        self._on_print_method_changed(self.print_method_combo)
+        
+
+        # --- Barcode-afmetingen ---
+        size_hint = Gtk.Label()
+        size_hint.set_markup(
+            "<small><i>Voor labelprinters (bv. Brother QL op 62mm rol): "
+            "de paginagrootte bij het printen wordt automatisch gelijk gezet aan "
+            "de afbeelding, dus deze instellingen bepalen direct hoeveel label "
+            "er wordt uitgevoerd.</i></small>"
+        )
+        size_hint.set_xalign(0)
+        size_hint.set_line_wrap(True)
+        size_hint.set_margin_top(8)
+        inner.pack_start(size_hint, False, False, 0)
+        
+        barcode_cfg = config.get("barcode", {})
+        
+        size_grid = Gtk.Grid()
+        size_grid.set_column_spacing(10)
+        size_grid.set_row_spacing(5)
+        inner.pack_start(size_grid, False, False, 0)
+        
+        size_grid.attach(Gtk.Label(label="Streepdikte (mm):", xalign=0), 0, 0, 1, 1)
+        self.module_width_entry = Gtk.Entry()
+        self.module_width_entry.set_text(str(barcode_cfg.get("module_width_mm", 0.4)))
+        size_grid.attach(self.module_width_entry, 1, 0, 1, 1)
+        width_hint = Gtk.Label()
+        width_hint.set_markup("<small><i>hoger = breder totaal + beter leesbaar</i></small>")
+        width_hint.set_xalign(0)
+        size_grid.attach(width_hint, 2, 0, 1, 1)
+        
+        size_grid.attach(Gtk.Label(label="Streephoogte (mm):", xalign=0), 0, 1, 1, 1)
+        self.module_height_entry = Gtk.Entry()
+        self.module_height_entry.set_text(str(barcode_cfg.get("module_height_mm", 7.0)))
+        size_grid.attach(self.module_height_entry, 1, 1, 1, 1)
+        height_hint = Gtk.Label()
+        height_hint.set_markup("<small><i>standaard (python-barcode) is 15mm</i></small>")
+        height_hint.set_xalign(0)
+        size_grid.attach(height_hint, 2, 1, 1, 1)
+        
+        size_grid.attach(Gtk.Label(label="Marge/quiet zone (mm):", xalign=0), 0, 2, 1, 1)
+        self.quiet_zone_entry = Gtk.Entry()
+        self.quiet_zone_entry.set_text(str(barcode_cfg.get("quiet_zone_mm", 2.0)))
+        size_grid.attach(self.quiet_zone_entry, 1, 2, 1, 1)
+        qz_hint = Gtk.Label()
+        qz_hint.set_markup("<small><i>kleiner = meer van de rolbreedte benut</i></small>")
+        qz_hint.set_xalign(0)
+        size_grid.attach(qz_hint, 2, 2, 1, 1)
         
         self.show_all()
+    
+    def _on_print_method_changed(self, widget):
+        is_brother_ql = self.print_method_combo.get_active_id() == "brother_ql"
+        self.cups_box.set_visible(not is_brother_ql)
+        self.brother_ql_box.set_visible(is_brother_ql)
+    
+    def _discover_brother_ql(self, widget):
+        try:
+            result = subprocess.run(
+                ["python3", "-m", "brother_ql", "discover"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10
+            )
+            output = result.stdout.decode("utf-8", errors="ignore").strip()
+            if output:
+                # pak de eerste gevonden identifier
+                for line in output.splitlines():
+                    if "usb://" in line:
+                        identifier = line.strip().split()[0] if " " not in line.split("usb://")[0] else line.strip()
+                        self.bq_identifier_entry.set_text(line.strip())
+                        break
+                self._toon_info_dialoog(f"Gevonden:\n{output}")
+            else:
+                self._toon_info_dialoog("Geen brother_ql-printer gevonden. Is de printer aan en verbonden via USB?")
+        except FileNotFoundError:
+            self._toon_info_dialoog("brother_ql is niet geïnstalleerd. Installeer met:\npip install brother_ql --break-system-packages")
+        except Exception as e:
+            self._toon_info_dialoog(f"Fout bij zoeken: {e}")
+    
+    def _toon_info_dialoog(self, msg):
+        dialog = Gtk.MessageDialog(
+            transient_for=self, flags=0, message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK, text=msg
+        )
+        dialog.run()
+        dialog.destroy()
     
     def _refresh_printers(self, widget):
         self.printer_combo.remove_all()
@@ -662,7 +913,23 @@ class SettingsDialog(Gtk.Dialog):
         printer_name = self.printer_combo.get_active_text() or ""
         self.config.set("printer", {
             "enabled": self.printer_enabled_check.get_active(),
+            "print_method": self.print_method_combo.get_active_id() or "cups",
             "printer_name": printer_name,
+            "brother_ql_model": self.bq_model_entry.get_text().strip(),
+            "brother_ql_label": self.bq_label_entry.get_text().strip(),
+            "brother_ql_identifier": self.bq_identifier_entry.get_text().strip(),
+        })
+        
+        def _safe_float(entry, default):
+            try:
+                return float(entry.get_text().strip().replace(",", "."))
+            except ValueError:
+                return default
+        
+        self.config.set("barcode", {
+            "module_width_mm": _safe_float(self.module_width_entry, 0.4),
+            "module_height_mm": _safe_float(self.module_height_entry, 7.0),
+            "quiet_zone_mm": _safe_float(self.quiet_zone_entry, 2.0),
         })
 
 
@@ -907,6 +1174,7 @@ class RegistreerTab(Gtk.Box):
             "sublocatie": sublocatie_naam,
             "rij": rij_naam,
             "verkocht": "nee",
+            "online": "nee",
             "algemene_voorwaarden": "",  # leeg = auto_marktplaats.py gebruikt de vaste tekst
         })
         
@@ -920,12 +1188,14 @@ class RegistreerTab(Gtk.Box):
         barcode_msg = ""
         if self.barcode_check.get_active():
             try:
-                barcode_path = genereer_barcode(artikelnummer, folder)
+                barcode_path = genereer_barcode(artikelnummer, folder, self.config.get("barcode", {}))
                 barcode_msg = f"\n📊 Barcode opgeslagen: {barcode_path}"
                 printer_cfg = self.config.get("printer", {})
-                if printer_cfg.get("enabled") and printer_cfg.get("printer_name"):
-                    print_barcode(barcode_path, printer_cfg["printer_name"])
-                    barcode_msg += f"\n🖨️ Verstuurd naar printer '{printer_cfg['printer_name']}'"
+                if printer_cfg.get("enabled"):
+                    print_barcode(barcode_path, printer_cfg)
+                    methode = printer_cfg.get("print_method", "cups")
+                    doel = printer_cfg.get("printer_name") if methode == "cups" else "Brother QL (USB)"
+                    barcode_msg += f"\n🖨️ Verstuurd naar printer '{doel}'"
             except Exception as e:
                 barcode_msg = f"\n⚠️ Barcode-fout: {e}"
         
@@ -951,9 +1221,9 @@ class RegistreerTab(Gtk.Box):
 # TAB 2: OVERZICHT
 # ============================================
 OVERZICHT_KOLOMMEN = ["artikelnummer", "titel", "categorie", "conditie", "vraagprijs",
-                      "aanmaakdatum", "verkocht", "verkoopprijs", "verkoopdatum"]
+                      "aanmaakdatum", "online", "advertentie_url", "verkocht", "verkoopprijs", "verkoopdatum"]
 OVERZICHT_LABELS = ["Artikelnummer", "Titel", "Categorie", "Conditie", "Vraagprijs",
-                    "Aanmaakdatum", "Verkocht", "Verkoopprijs", "Verkoopdatum"]
+                    "Aanmaakdatum", "Online", "Advertentie-URL", "Verkocht", "Verkoopprijs", "Verkoopdatum"]
 
 
 class OverzichtTab(Gtk.Box):
@@ -966,10 +1236,11 @@ class OverzichtTab(Gtk.Box):
         # Filter-knoppen
         filter_row = Gtk.Box(spacing=5)
         self.filter_alles_btn = Gtk.RadioButton.new_with_label_from_widget(None, "Alles")
-        self.filter_nietverkocht_btn = Gtk.RadioButton.new_with_label_from_widget(self.filter_alles_btn, "Nog niet verkocht")
+        self.filter_offline_btn = Gtk.RadioButton.new_with_label_from_widget(self.filter_alles_btn, "Offline")
+        self.filter_online_btn = Gtk.RadioButton.new_with_label_from_widget(self.filter_alles_btn, "Online")
         self.filter_verkocht_btn = Gtk.RadioButton.new_with_label_from_widget(self.filter_alles_btn, "Verkocht")
-        self.filter_nietverkocht_btn.set_active(True)
-        for btn in (self.filter_alles_btn, self.filter_nietverkocht_btn, self.filter_verkocht_btn):
+        self.filter_offline_btn.set_active(True)
+        for btn in (self.filter_alles_btn, self.filter_offline_btn, self.filter_online_btn, self.filter_verkocht_btn):
             btn.connect("toggled", lambda w: self.herlaad())
             filter_row.pack_start(btn, False, False, 0)
         
@@ -1006,6 +1277,10 @@ class OverzichtTab(Gtk.Box):
         self.verwijder_btn.connect("clicked", self._on_verwijderen)
         actie_row.pack_start(self.verwijder_btn, False, False, 0)
         
+        self.online_btn = Gtk.Button(label="🌐 Markeer als online")
+        self.online_btn.connect("clicked", self._on_markeer_online)
+        actie_row.pack_start(self.online_btn, False, False, 0)
+        
         self.verkocht_btn = Gtk.Button(label="💰 Markeer als verkocht")
         self.verkocht_btn.connect("clicked", self._on_markeer_verkocht)
         actie_row.pack_start(self.verkocht_btn, False, False, 0)
@@ -1030,8 +1305,14 @@ class OverzichtTab(Gtk.Box):
         self.store.clear()
         producten = self._huidige_producten()
         
-        if self.filter_nietverkocht_btn.get_active():
-            producten = [p for p in producten if p.get("verkocht", "nee").lower() != "ja"]
+        if self.filter_offline_btn.get_active():
+            producten = [p for p in producten
+                         if p.get("verkocht", "nee").lower() != "ja"
+                         and p.get("online", "nee").lower() != "ja"]
+        elif self.filter_online_btn.get_active():
+            producten = [p for p in producten
+                         if p.get("verkocht", "nee").lower() != "ja"
+                         and p.get("online", "nee").lower() == "ja"]
         elif self.filter_verkocht_btn.get_active():
             producten = [p for p in producten if p.get("verkocht", "nee").lower() == "ja"]
         
@@ -1100,22 +1381,86 @@ class OverzichtTab(Gtk.Box):
             self._toon_foutdialoog("Selecteer eerst een product.")
             return
         
+        storage = get_backend(self.config)
+        producten = storage.load_products()
+        product = next((p for p in producten if p.get("artikelnummer") == artikelnummer), None)
+        folder = product.get("folder_locatie", "").strip() if product else ""
+        folder_bestaat = bool(folder) and os.path.isdir(folder)
+        
         confirm = Gtk.MessageDialog(
             transient_for=self.main_window, flags=0,
             message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.YES_NO,
-            text=f"Product {artikelnummer} definitief verwijderen uit de opslag?"
+            text=f"Product {artikelnummer} verwijderen uit de opslag?"
         )
-        confirm.format_secondary_text("De productmap met foto's/omschrijving wordt NIET verwijderd, alleen de registratie.")
+        if folder_bestaat:
+            confirm.format_secondary_text(f"De productmap wordt naar de prullenbak verplaatst:\n{folder}")
+        else:
+            confirm.format_secondary_text("Geen (bestaande) productmap gevonden om te verplaatsen.")
         response = confirm.run()
         confirm.destroy()
         
         if response == Gtk.ResponseType.YES:
-            storage = get_backend(self.config)
             try:
                 storage.delete_product(artikelnummer)
-                self.herlaad()
             except Exception as e:
                 self._toon_foutdialoog(f"Kon niet verwijderen: {e}")
+                return
+            
+            if folder_bestaat:
+                try:
+                    from send2trash import send2trash
+                    send2trash(folder)
+                except ImportError:
+                    self._toon_foutdialoog(
+                        "Product is verwijderd uit de opslag, maar send2trash is niet "
+                        "geïnstalleerd - de map is blijven staan. Installeer met:\n"
+                        "pip install Send2Trash --break-system-packages"
+                    )
+                except Exception as e:
+                    self._toon_foutdialoog(
+                        f"Product is verwijderd uit de opslag, maar de map kon niet naar "
+                        f"de prullenbak worden verplaatst: {e}"
+                    )
+            
+            self.herlaad()
+    
+    def _on_markeer_online(self, widget):
+        artikelnummer = self._geselecteerd_artikelnummer()
+        if not artikelnummer:
+            self._toon_foutdialoog("Selecteer eerst een product.")
+            return
+        
+        dialog = Gtk.Dialog(title="Markeer als online", transient_for=self.main_window, flags=0)
+        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        box = dialog.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(10)
+        
+        box.pack_start(Gtk.Label(label=f"Advertentie-URL voor {artikelnummer} (optioneel):"), False, False, 0)
+        url_entry = Gtk.Entry()
+        url_entry.set_placeholder_text("https://www.marktplaats.nl/v/...")
+        box.pack_start(url_entry, False, False, 0)
+        
+        dialog.show_all()
+        response = dialog.run()
+        url = url_entry.get_text().strip()
+        dialog.destroy()
+        
+        if response == Gtk.ResponseType.OK:
+            storage = get_backend(self.config)
+            producten = storage.load_products()
+            product = next((p for p in producten if p.get("artikelnummer") == artikelnummer), None)
+            if not product:
+                self._toon_foutdialoog("Product niet gevonden.")
+                return
+            product["online"] = "ja"
+            if url:
+                product["advertentie_url"] = url
+            try:
+                storage.update_product(artikelnummer, product)
+                self.herlaad()
+            except Exception as e:
+                self._toon_foutdialoog(f"Kon niet opslaan: {e}")
     
     def _on_markeer_verkocht(self, widget):
         artikelnummer = self._geselecteerd_artikelnummer()
