@@ -1,4 +1,6 @@
-# MarktplaatsProductmanager
+# 
+https://github.com/user-attachments/assets/65669009-7e2f-4b23-af0a-23a458b4fc72
+
 
 <img width="1533" height="868" alt="Screenshot From 2026-08-01 13-54-16" src="https://github.com/user-attachments/assets/5ef3cff7-a4bf-4e85-8381-b005ee15e896" />
 
@@ -6,6 +8,5 @@
 
 Inventarisatie en archiveringsprogramma voor te registreren producten voor marktplaats.
 
-https://github.com/user-attachments/assets/57414801-d1af-450b-a7f6-968e789acca7
 
 
