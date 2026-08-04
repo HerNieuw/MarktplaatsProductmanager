@@ -55,6 +55,12 @@ COLUMNS = [
     "verkoopdatum",                               # W (22)
     "algemene_voorwaarden",                        # X (23) - ook gebruikt door auto_marktplaats.py
     "advertentie_url",                              # Y (24) - nieuw, alleen ingevuld als online=ja
+    "leverwijze",                                     # Z (25) - "ophalen" of "verzenden"
+    "klant_naam",                                      # AA (26) - Marktplaatsnaam koper
+    "klant_telefoon",                                    # AB (27) - alleen bij ophalen
+    "klant_email",                                        # AC (28) - alleen bij ophalen
+    "ophaal_afspraak",                                     # AD (29) - alleen bij ophalen
+    "track_trace",                                          # AE (30) - alleen bij verzenden, optioneel
 ]
 COL = {name: idx for idx, name in enumerate(COLUMNS)}
 
@@ -86,8 +92,12 @@ textview {
     border-radius: 4px;
 }
 textview text {
-    background-color: @theme_base_color;
-    color: @theme_text_color;
+    /* Vaste, thema-onafhankelijke kleur i.p.v. @theme_base_color - die
+       bleek in dit thema hetzelfde te zijn als de vensterachtergrond,
+       waardoor er geen zichtbaar contrast was. Pas deze hex gerust aan
+       als 'ie op jouw systeem nog niet precies goed oogt. */
+    background-color: #3a3a3a;
+    color: #e8e8e8;
     padding: 5px;
 }
 """
@@ -1221,9 +1231,11 @@ class RegistreerTab(Gtk.Box):
 # TAB 2: OVERZICHT
 # ============================================
 OVERZICHT_KOLOMMEN = ["artikelnummer", "titel", "categorie", "conditie", "vraagprijs",
-                      "aanmaakdatum", "online", "advertentie_url", "verkocht", "verkoopprijs", "verkoopdatum"]
+                      "aanmaakdatum", "online", "advertentie_url", "verkocht", "verkoopprijs",
+                      "verkoopdatum", "leverwijze", "klant_naam"]
 OVERZICHT_LABELS = ["Artikelnummer", "Titel", "Categorie", "Conditie", "Vraagprijs",
-                    "Aanmaakdatum", "Online", "Advertentie-URL", "Verkocht", "Verkoopprijs", "Verkoopdatum"]
+                    "Aanmaakdatum", "Online", "Advertentie-URL", "Verkocht", "Verkoopprijs",
+                    "Verkoopdatum", "Leverwijze", "Klant"]
 
 
 class OverzichtTab(Gtk.Box):
@@ -1468,43 +1480,130 @@ class OverzichtTab(Gtk.Box):
             self._toon_foutdialoog("Selecteer eerst een product.")
             return
         
-        dialog = Gtk.Dialog(title="Markeer als verkocht", transient_for=self.main_window, flags=0)
-        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
-        box = dialog.get_content_area()
-        box.set_spacing(8)
-        box.set_border_width(10)
-        
-        box.pack_start(Gtk.Label(label=f"Verkoopprijs voor {artikelnummer}:"), False, False, 0)
-        prijs_entry = Gtk.Entry()
-        prijs_entry.set_placeholder_text("bijv. 45.00")
-        box.pack_start(prijs_entry, False, False, 0)
-        
-        vandaag = datetime.date.today().isoformat()
-        box.pack_start(Gtk.Label(label=f"Verkoopdatum: {vandaag} (automatisch)"), False, False, 0)
-        
-        dialog.show_all()
+        dialog = VerkochtDialog(self.main_window, artikelnummer)
         response = dialog.run()
-        prijs = prijs_entry.get_text().strip()
+        gegevens = dialog.get_gegevens() if response == Gtk.ResponseType.OK else None
         dialog.destroy()
         
-        if response == Gtk.ResponseType.OK:
-            if not prijs:
-                self._toon_foutdialoog("Vul een verkoopprijs in.")
-                return
-            storage = get_backend(self.config)
-            producten = storage.load_products()
-            product = next((p for p in producten if p.get("artikelnummer") == artikelnummer), None)
-            if not product:
-                self._toon_foutdialoog("Product niet gevonden.")
-                return
-            product["verkocht"] = "ja"
-            product["verkoopprijs"] = prijs
-            product["verkoopdatum"] = vandaag
-            try:
-                storage.update_product(artikelnummer, product)
-                self.herlaad()
-            except Exception as e:
-                self._toon_foutdialoog(f"Kon niet opslaan: {e}")
+        if gegevens is None:
+            return
+        
+        if not gegevens["verkoopprijs"]:
+            self._toon_foutdialoog("Vul een verkoopprijs in.")
+            return
+        
+        storage = get_backend(self.config)
+        producten = storage.load_products()
+        product = next((p for p in producten if p.get("artikelnummer") == artikelnummer), None)
+        if not product:
+            self._toon_foutdialoog("Product niet gevonden.")
+            return
+        
+        product["verkocht"] = "ja"
+        product.update(gegevens)
+        try:
+            storage.update_product(artikelnummer, product)
+            self.herlaad()
+        except Exception as e:
+            self._toon_foutdialoog(f"Kon niet opslaan: {e}")
+
+
+class VerkochtDialog(Gtk.Dialog):
+    """Dialoog voor het markeren als verkocht: eerst kiezen tussen Ophalen
+    en Verzenden, met bijbehorende klantgegevens."""
+    def __init__(self, parent, artikelnummer):
+        super().__init__(title=f"Markeer als verkocht - {artikelnummer}", transient_for=parent, flags=0)
+        self.set_default_size(420, 380)
+        self.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+        
+        box = self.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(12)
+        
+        box.pack_start(Gtk.Label(label=f"Verkoopprijs voor {artikelnummer}:", xalign=0), False, False, 0)
+        self.prijs_entry = Gtk.Entry()
+        self.prijs_entry.set_placeholder_text("bijv. 45.00")
+        box.pack_start(self.prijs_entry, False, False, 0)
+        
+        vandaag = datetime.date.today().isoformat()
+        box.pack_start(Gtk.Label(label=f"Verkoopdatum: {vandaag} (automatisch)", xalign=0), False, False, 0)
+        self.vandaag = vandaag
+        
+        box.pack_start(Gtk.Separator(), False, False, 6)
+        
+        box.pack_start(self._bold_label("Leverwijze"), False, False, 0)
+        lever_row = Gtk.Box(spacing=10)
+        self.ophalen_btn = Gtk.RadioButton.new_with_label_from_widget(None, "Ophalen")
+        self.verzenden_btn = Gtk.RadioButton.new_with_label_from_widget(self.ophalen_btn, "Verzenden")
+        self.ophalen_btn.connect("toggled", self._on_leverwijze_changed)
+        lever_row.pack_start(self.ophalen_btn, False, False, 0)
+        lever_row.pack_start(self.verzenden_btn, False, False, 0)
+        box.pack_start(lever_row, False, False, 0)
+        
+        box.pack_start(Gtk.Label(label="Marktplaatsnaam koper:", xalign=0), False, False, 0)
+        self.klant_naam_entry = Gtk.Entry()
+        box.pack_start(self.klant_naam_entry, False, False, 0)
+        
+        # --- Ophalen-specifieke velden ---
+        self.ophalen_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.pack_start(self.ophalen_box, False, False, 0)
+        
+        self.ophalen_box.pack_start(Gtk.Label(label="Telefoonnummer:", xalign=0), False, False, 0)
+        self.telefoon_entry = Gtk.Entry()
+        self.ophalen_box.pack_start(self.telefoon_entry, False, False, 0)
+        
+        self.ophalen_box.pack_start(Gtk.Label(label="E-mail:", xalign=0), False, False, 0)
+        self.email_entry = Gtk.Entry()
+        self.ophalen_box.pack_start(self.email_entry, False, False, 0)
+        
+        self.ophalen_box.pack_start(Gtk.Label(label="Afspraak (datum/tijd ophalen):", xalign=0), False, False, 0)
+        self.afspraak_entry = Gtk.Entry()
+        self.afspraak_entry.set_placeholder_text("bijv. zaterdag 14:00")
+        self.ophalen_box.pack_start(self.afspraak_entry, False, False, 0)
+        
+        # --- Verzenden-specifieke velden ---
+        self.verzenden_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.pack_start(self.verzenden_box, False, False, 0)
+        
+        self.verzenden_box.pack_start(Gtk.Label(label="Track & Trace-nummer (optioneel):", xalign=0), False, False, 0)
+        self.track_trace_entry = Gtk.Entry()
+        self.verzenden_box.pack_start(self.track_trace_entry, False, False, 0)
+        
+        self.ophalen_btn.set_active(True)
+        self._on_leverwijze_changed(self.ophalen_btn)
+        
+        self.show_all()
+    
+    def _bold_label(self, text):
+        label = Gtk.Label()
+        label.set_markup(f"<b>{text}</b>")
+        label.set_xalign(0)
+        return label
+    
+    def _on_leverwijze_changed(self, widget):
+        is_ophalen = self.ophalen_btn.get_active()
+        self.ophalen_box.set_visible(is_ophalen)
+        self.verzenden_box.set_visible(not is_ophalen)
+    
+    def get_gegevens(self):
+        leverwijze = "ophalen" if self.ophalen_btn.get_active() else "verzenden"
+        gegevens = {
+            "verkoopprijs": self.prijs_entry.get_text().strip(),
+            "verkoopdatum": self.vandaag,
+            "leverwijze": leverwijze,
+            "klant_naam": self.klant_naam_entry.get_text().strip(),
+        }
+        if leverwijze == "ophalen":
+            gegevens["klant_telefoon"] = self.telefoon_entry.get_text().strip()
+            gegevens["klant_email"] = self.email_entry.get_text().strip()
+            gegevens["ophaal_afspraak"] = self.afspraak_entry.get_text().strip()
+            gegevens["track_trace"] = ""
+        else:
+            gegevens["klant_telefoon"] = ""
+            gegevens["klant_email"] = ""
+            gegevens["ophaal_afspraak"] = ""
+            gegevens["track_trace"] = self.track_trace_entry.get_text().strip()
+        return gegevens
 
 
 class BewerkDialog(Gtk.Dialog):
