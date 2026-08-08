@@ -399,6 +399,7 @@ class ConfigManager:
         "sublocatie_codes": {"Sublocatie 1": "1", "Sublocatie 2": "2"},
         "rij_codes": {"Rij 1": "1", "Rij 2": "2"},
         "volgnummers": {},
+        "algemene_voorwaarden_pad": "",  # Pad naar eigen algemene voorwaarden bestand
         "printer": {
             "enabled": False,
             "print_method": "cups",
@@ -406,7 +407,7 @@ class ConfigManager:
             "brother_ql_model": "QL-500",
             "brother_ql_label": "62",
             "brother_ql_identifier": "",
-            "auto_cut": True,  # Automatisch snijden na printen
+            "auto_cut": True,
         },
         "barcode": {
             "module_width_mm": 0.4,
@@ -625,7 +626,9 @@ def generate_artikelnummer(config, storage, opslaglocatie_code, sublocatie_code,
     return f"{teller_sleutel}{nieuw_nummer:02d}"
 
 
-def build_txt_beschrijving(product):
+def build_txt_beschrijving(product, config=None):
+    """Genereert omschrijving.txt in het mapje van het artikelnummer.
+    Gebruikt de algemene voorwaarden uit het configuratiebestand indien aanwezig."""
     parts = []
 
     titel = product.get("titel", "")
@@ -663,13 +666,27 @@ def build_txt_beschrijving(product):
     if specs:
         parts.append("\n".join(specs))
 
-    voorwaarden = product.get("algemene_voorwaarden") or ALGEMENE_VOORWAARDEN
+    # Algemene voorwaarden - probeer eerst uit bestand, anders standaard
+    voorwaarden = product.get("algemene_voorwaarden")
+    if not voorwaarden and config:
+        av_pad = config.get("algemene_voorwaarden_pad", "")
+        if av_pad and os.path.exists(av_pad):
+            try:
+                with open(av_pad, "r", encoding="utf-8") as f:
+                    voorwaarden = f.read()
+            except Exception:
+                pass
+
+    if not voorwaarden:
+        voorwaarden = ALGEMENE_VOORWAARDEN
+
     parts.append(voorwaarden)
 
     return "\n\n".join(parts)
 
 
 def maak_product_map(config, product):
+    """Maakt (of hergebruikt) de map voor dit artikelnummer."""
     base_folder = config.get("base_folder")
     artikelnummer = product["artikelnummer"]
     folder = os.path.join(base_folder, artikelnummer)
@@ -678,7 +695,7 @@ def maak_product_map(config, product):
 
     txt_path = os.path.join(folder, "omschrijving.txt")
     with open(txt_path, "w", encoding="utf-8") as f:
-        f.write(build_txt_beschrijving(product))
+        f.write(build_txt_beschrijving(product, config))
 
     return folder, bestond_al
 
@@ -1032,7 +1049,7 @@ class SettingsDialog(Gtk.Dialog):
     def __init__(self, parent, config):
         super().__init__(title="Instellingen", transient_for=parent, flags=0)
         self.config = config
-        self.set_default_size(560, 750)
+        self.set_default_size(560, 800)
         self.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_SAVE, Gtk.ResponseType.OK)
 
         box = self.get_content_area()
@@ -1090,6 +1107,42 @@ class SettingsDialog(Gtk.Dialog):
         self.base_folder_entry = Gtk.Entry()
         self.base_folder_entry.set_text(config.get("base_folder", ""))
         inner.pack_start(self.base_folder_entry, False, False, 0)
+
+        inner.pack_start(Gtk.Separator(), False, False, 5)
+
+        # --- Algemene voorwaarden ---
+        inner.pack_start(self._section_label("Algemene voorwaarden"), False, False, 0)
+        av_hint = Gtk.Label()
+        av_hint.set_markup("<small><i>Selecteer een .txt bestand met uw eigen algemene voorwaarden. De opmaak uit het bestand wordt gebruikt. Laat leeg voor de standaard voorwaarden.</i></small>")
+        av_hint.set_xalign(0)
+        av_hint.set_line_wrap(True)
+        inner.pack_start(av_hint, False, False, 0)
+
+        av_row = Gtk.Box(spacing=5)
+        self.av_entry = Gtk.Entry()
+        av_pad = config.get("algemene_voorwaarden_pad", "")
+        self.av_entry.set_text(av_pad)
+        self.av_entry.set_placeholder_text("Pad naar algemene_voorwaarden.txt")
+        self.av_entry.connect("changed", self._on_av_entry_changed)
+        av_row.pack_start(self.av_entry, True, True, 0)
+
+        av_browse_btn = Gtk.Button(label="📂 Bladeren")
+        av_browse_btn.connect("clicked", self._browse_av_bestand)
+        av_row.pack_start(av_browse_btn, False, False, 0)
+
+        av_view_btn = Gtk.Button(label="👁️ Bekijk")
+        av_view_btn.connect("clicked", self._view_av_bestand)
+        av_row.pack_start(av_view_btn, False, False, 0)
+
+        inner.pack_start(av_row, False, False, 0)
+
+        # Preview
+        self.av_preview = Gtk.Label()
+        self.av_preview.set_xalign(0)
+        self.av_preview.set_line_wrap(True)
+        self.av_preview.set_selectable(True)
+        self._update_av_preview()
+        inner.pack_start(self.av_preview, False, False, 0)
 
         inner.pack_start(Gtk.Separator(), False, False, 5)
 
@@ -1158,7 +1211,6 @@ class SettingsDialog(Gtk.Dialog):
         self.printer_enabled_check.set_active(config.get("printer", {}).get("enabled", False))
         inner.pack_start(self.printer_enabled_check, False, False, 0)
 
-        # Auto-cut optie
         self.auto_cut_check = Gtk.CheckButton(label="Auto-cut inschakelen (snijden na printen)")
         self.auto_cut_check.set_active(config.get("printer", {}).get("auto_cut", True))
         inner.pack_start(self.auto_cut_check, False, False, 0)
@@ -1257,6 +1309,107 @@ class SettingsDialog(Gtk.Dialog):
 
         self.show_all()
 
+    def _on_av_entry_changed(self, widget):
+        self._update_av_preview()
+
+    def _browse_av_bestand(self, widget):
+        dialog = Gtk.FileChooserDialog(
+            title="Kies algemene voorwaarden bestand",
+            transient_for=self,
+            action=Gtk.FileChooserAction.OPEN
+        )
+        dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OPEN, Gtk.ResponseType.OK)
+
+        filter_txt = Gtk.FileFilter()
+        filter_txt.set_name("Tekstbestanden (*.txt)")
+        filter_txt.add_pattern("*.txt")
+        dialog.add_filter(filter_txt)
+
+        filter_all = Gtk.FileFilter()
+        filter_all.set_name("Alle bestanden")
+        filter_all.add_pattern("*")
+        dialog.add_filter(filter_all)
+
+        response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+            bestandspad = dialog.get_filename()
+            self.av_entry.set_text(bestandspad)
+            self._update_av_preview()
+        dialog.destroy()
+
+    def _view_av_bestand(self, widget):
+        av_pad = self.av_entry.get_text().strip()
+        if not av_pad or not os.path.exists(av_pad):
+            self._toon_info_dialoog("Geen geldig bestand geselecteerd.\nGebruik de knop 'Bladeren' om een .txt bestand te kiezen.")
+            return
+
+        try:
+            with open(av_pad, "r", encoding="utf-8") as f:
+                inhoud = f.read()
+
+            dialog = Gtk.Dialog(
+                title="Algemene voorwaarden - voorbeeld",
+                transient_for=self,
+                flags=0
+            )
+            dialog.set_default_size(500, 400)
+            dialog.add_buttons(Gtk.STOCK_CLOSE, Gtk.ResponseType.CLOSE)
+
+            box = dialog.get_content_area()
+            box.set_spacing(8)
+            box.set_border_width(10)
+
+            label = Gtk.Label(label=f"Bestand: {os.path.basename(av_pad)}")
+            label.set_xalign(0)
+            box.pack_start(label, False, False, 0)
+
+            scrolled = Gtk.ScrolledWindow()
+            scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            scrolled.set_size_request(-1, 350)
+            box.pack_start(scrolled, True, True, 0)
+
+            textview = Gtk.TextView()
+            textview.set_wrap_mode(Gtk.WrapMode.WORD)
+            textview.get_buffer().set_text(inhoud)
+            textview.set_editable(False)
+            scrolled.add(textview)
+
+            dialog.show_all()
+            dialog.run()
+            dialog.destroy()
+
+        except Exception as e:
+            self._toon_info_dialoog(f"Fout bij lezen bestand: {e}")
+
+    def _update_av_preview(self):
+        av_pad = self.av_entry.get_text().strip()
+        if av_pad and os.path.exists(av_pad):
+            try:
+                with open(av_pad, "r", encoding="utf-8") as f:
+                    inhoud = f.read()
+                regels = inhoud.splitlines()[:5]
+                preview = "\n".join(regels)
+                if len(inhoud.splitlines()) > 5:
+                    preview += "\n..."
+                self.av_preview.set_markup(f"<small><i>📄 Voorbeeld uit bestand:</i></small>\n<tt>{GLib.markup_escape_text(preview)}</tt>")
+            except Exception as e:
+                self.av_preview.set_markup(f"<span foreground='red'>⚠️ Kan bestand niet lezen: {e}</span>")
+        else:
+            regels = ALGEMENE_VOORWAARDEN.splitlines()[:5]
+            preview = "\n".join(regels) + "\n..."
+            self.av_preview.set_markup(f"<small><i>📄 Standaard voorwaarden (ingebouwd):</i></small>\n<tt>{GLib.markup_escape_text(preview)}</tt>")
+
+    def _toon_info_dialoog(self, msg):
+        dialog = Gtk.MessageDialog(
+            transient_for=self, flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text=msg
+        )
+        dialog.run()
+        dialog.destroy()
+
+    # De rest van de methods blijven hetzelfde...
     def _on_print_method_changed(self, widget):
         is_brother_ql = self.print_method_combo.get_active_id() == "brother_ql"
         self.cups_box.set_visible(not is_brother_ql)
@@ -1281,14 +1434,6 @@ class SettingsDialog(Gtk.Dialog):
             self._toon_info_dialoog("brother_ql is niet geïnstalleerd.")
         except Exception as e:
             self._toon_info_dialoog(f"Fout: {e}")
-
-    def _toon_info_dialoog(self, msg):
-        dialog = Gtk.MessageDialog(
-            transient_for=self, flags=0, message_type=Gtk.MessageType.INFO,
-            buttons=Gtk.ButtonsType.OK, text=msg
-        )
-        dialog.run()
-        dialog.destroy()
 
     def _refresh_printers(self, widget):
         self.printer_combo.remove_all()
@@ -1331,6 +1476,9 @@ class SettingsDialog(Gtk.Dialog):
         self.config.set("opslaglocatie_codes", self._parse_key_value_lines(self.opslaglocatie_view))
         self.config.set("sublocatie_codes", self._parse_key_value_lines(self.sublocatie_view))
         self.config.set("rij_codes", self._parse_key_value_lines(self.rij_view))
+
+        # Algemene voorwaarden pad opslaan
+        self.config.set("algemene_voorwaarden_pad", self.av_entry.get_text().strip())
 
         printer_name = self.printer_combo.get_active_text() or ""
         self.config.set("printer", {
@@ -1707,6 +1855,7 @@ class RegistreerTab(Gtk.Box):
 
     def _toon_fout(self, msg):
         self.status_label.set_markup(f"<span foreground='red'>❌ {msg}</span>")
+
 # ============================================
 # TAB 2: OVERZICHT
 # ============================================
@@ -2350,6 +2499,7 @@ class OverzichtTab(Gtk.Box):
 
     def _export_csv(self, widget):
         """Exporteer de huidige weergave naar CSV."""
+
         # Kies bestandsnaam
         dialog = Gtk.FileChooserDialog(
             title="CSV opslaan",
@@ -3046,6 +3196,15 @@ class MainWindow(Gtk.Window):
 
         self.overzicht_tab = OverzichtTab(self)
         self.notebook.append_page(self.overzicht_tab, Gtk.Label(label="📊 Overzicht"))
+
+        # Statusbalk
+        self.statusbar = Gtk.Statusbar()
+        # set_has_resize_grip is deprecated/verwijderd in nieuwere GTK
+        # Gebruik in plaats daarvan:
+        self.statusbar.set_hexpand(True)
+        vbox.pack_start(self.statusbar, False, False, 0)
+        self.status_context = self.statusbar.get_context_id("main")
+        self.statusbar.push(self.status_context, "✅ Klaar voor gebruik")
 
     def _open_settings(self, widget):
         dialog = SettingsDialog(self, self.config)
