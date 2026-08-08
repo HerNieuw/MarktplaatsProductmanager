@@ -18,6 +18,8 @@ from gi.repository import Gtk, Gdk, GLib, GdkPixbuf
 import os
 import sys
 import json
+import hashlib
+import secrets
 import shutil
 import subprocess
 import datetime
@@ -61,6 +63,7 @@ COLUMNS = [
     "klant_email",                                        # AC (28) - alleen bij ophalen
     "ophaal_afspraak",                                     # AD (29) - alleen bij ophalen
     "track_trace",                                          # AE (30) - alleen bij verzenden, optioneel
+    "verwerkt_door",                                          # AF (31) - gebruikersnaam die het product registreerde
 ]
 COL = {name: idx for idx, name in enumerate(COLUMNS)}
 
@@ -111,27 +114,27 @@ def apply_css():
         screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
     )
 
-ALGEMENE_VOORWAARDEN = """Algemene voorwaarden: 
-Wij zijn een kleine kringloopwinkel en proberen z.s.m. te reageren. Soms is het heel druk in de winkel en lukt dit niet dezelfde dag. 
+ALGEMENE_VOORWAARDEN = """Algemene voorwaarden:
+Wij zijn een kleine kringloopwinkel en proberen z.s.m. te reageren. Soms is het heel druk in de winkel en lukt dit niet dezelfde dag.
 
-De richtprijs van een product baseren wij op bestaand aanbod en staat van het artikel met minimum/maximum schatting. 
+De richtprijs van een product baseren wij op bestaand aanbod en staat van het artikel met minimum/maximum schatting.
 
-Graag alleen biedingen plaatsen via de bied optie van marktplaats. Advertenties laten we vaak minimaal 2 weken online staan voordat we akkoord gaan met het hoogste aannemelijke bod. Bedankt voor uw begrip 🙏🏻 
+Graag alleen biedingen plaatsen via de bied optie van marktplaats. Advertenties laten we vaak minimaal 2 weken online staan voordat we akkoord gaan met het hoogste aannemelijke bod. Bedankt voor uw begrip 🙏🏻
 
 Als wij akkoord gaan met uw bod, reserveren wij het product maximaal een week voor u. U kunt het product ophalen en afrekenen in onze winkel.
 
-U bent altijd welkom in onze winkel, maar langskomen voor de Marktplaats advertenties zonder afspraak wordt niet op prijs gesteld. Dit gaat altijd via specifieke medewerkers. 
+U bent altijd welkom in onze winkel, maar langskomen voor de Marktplaats advertenties zonder afspraak wordt niet op prijs gesteld. Dit gaat altijd via specifieke medewerkers.
 
-Let op: Bij ophalen in de winkel vervalt het herroepingsrecht en kun je het product ter plekke testen. 
+Let op: Bij ophalen in de winkel vervalt het herroepingsrecht en kun je het product ter plekke testen.
 
 Ons adres:
-Kringloop HerNieuw 
-Willem Beukelszstraat 6B 
+Kringloop HerNieuw
+Willem Beukelszstraat 6B
 3261 LV Oud-Beijerland
 
-Openingstijden Kringloop: 
-Dinsdag t/m vrijdag 10.00 – 16.00 uur 
-Zaterdag 10:00-13:00 uur 
+Openingstijden Kringloop:
+Dinsdag t/m vrijdag 10.00 – 16.00 uur
+Zaterdag 10:00-13:00 uur
 Zondag en maandag Gesloten"""
 
 
@@ -141,6 +144,64 @@ def config_dir():
 
 def config_path():
     return os.path.join(config_dir(), "productmanager_config.json")
+
+
+def users_path():
+    return os.path.join(config_dir(), "productmanager_users.json")
+
+
+# ============================================
+# GEBRUIKERSBEHEER
+# ============================================
+def _hash_password(password, salt=None):
+    if salt is None:
+        salt = secrets.token_hex(16)
+    digest = hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
+    return salt, digest
+
+
+class UserManager:
+    """Simpele multi-gebruiker login. Wachtwoorden worden gehasht (salt +
+    sha256) opgeslagen, nooit in platte tekst."""
+    def __init__(self):
+        self.path = users_path()
+        self.data = self._load()
+
+    def _load(self):
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}  # {gebruikersnaam: {"salt": ..., "hash": ...}}
+
+    def save(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, indent=2, ensure_ascii=False)
+
+    def heeft_gebruikers(self):
+        return len(self.data) > 0
+
+    def gebruikersnamen(self):
+        return sorted(self.data.keys())
+
+    def voeg_toe(self, gebruikersnaam, wachtwoord):
+        salt, digest = _hash_password(wachtwoord)
+        self.data[gebruikersnaam] = {"salt": salt, "hash": digest}
+        self.save()
+
+    def verwijder(self, gebruikersnaam):
+        if gebruikersnaam in self.data:
+            del self.data[gebruikersnaam]
+            self.save()
+
+    def controleer(self, gebruikersnaam, wachtwoord):
+        info = self.data.get(gebruikersnaam)
+        if not info:
+            return False
+        _, digest = _hash_password(wachtwoord, info["salt"])
+        return digest == info["hash"]
 
 
 # ============================================
@@ -366,10 +427,10 @@ def generate_artikelnummer(config, storage, opslaglocatie_code, sublocatie_code,
     prefix = f"{opslaglocatie_code}{sublocatie_code}{rij_code}"
     datum_deel = datetime.date.today().strftime("%d%m")  # DDMM, 4 cijfers
     teller_sleutel = f"{prefix}{datum_deel}"
-    
+
     volgnummers = config.get("volgnummers", {})
     laatste = volgnummers.get(teller_sleutel, 0)
-    
+
     # Kruis-check met bestaande data, voor het geval de teller (config.json)
     # niet meer synchroon loopt met de opslag (bv. na handmatige XML-edit
     # of een andere computer die dezelfde sheet gebruikt).
@@ -385,7 +446,7 @@ def generate_artikelnummer(config, storage, opslaglocatie_code, sublocatie_code,
                     pass
     except Exception:
         pass
-    
+
     nieuw_nummer = laatste + 1
     if nieuw_nummer > 99:
         raise ValueError(
@@ -393,7 +454,7 @@ def generate_artikelnummer(config, storage, opslaglocatie_code, sublocatie_code,
         )
     volgnummers[teller_sleutel] = nieuw_nummer
     config.set("volgnummers", volgnummers)
-    
+
     return f"{teller_sleutel}{nieuw_nummer:02d}"
 
 
@@ -404,15 +465,15 @@ def build_txt_beschrijving(product):
     .txt is de enige plek waar de opmaak wordt beheerd; auto_marktplaats.py
     leest 'm rechtstreeks in plaats van de tekst zelf opnieuw op te bouwen."""
     parts = []
-    
+
     titel = product.get("titel", "")
     if titel:
         parts.append(titel)
-    
+
     omschrijving = product.get("omschrijving", "")
     if omschrijving:
         parts.append(omschrijving)
-    
+
     specs = []
     lengte = product.get("lengte", "")
     breedte = product.get("breedte", "")
@@ -439,10 +500,10 @@ def build_txt_beschrijving(product):
         specs.append(f"* Artikelnummer: {product.get('artikelnummer')}")
     if specs:
         parts.append("\n".join(specs))
-    
+
     voorwaarden = product.get("algemene_voorwaarden") or ALGEMENE_VOORWAARDEN
     parts.append(voorwaarden)
-    
+
     return "\n\n".join(parts)
 
 
@@ -455,11 +516,11 @@ def maak_product_map(config, product):
     folder = os.path.join(base_folder, artikelnummer)
     bestond_al = os.path.exists(folder)
     os.makedirs(folder, exist_ok=True)
-    
+
     txt_path = os.path.join(folder, "omschrijving.txt")
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(build_txt_beschrijving(product))
-    
+
     return folder, bestond_al
 
 
@@ -475,14 +536,14 @@ def genereer_barcode(artikelnummer, output_folder, barcode_config=None):
             "python-barcode is niet geïnstalleerd. Installeer met:\n"
             "pip install python-barcode --break-system-packages"
         )
-    
+
     # Compatibiliteits-fix: Pillow 10+ heeft Image.ANTIALIAS verwijderd
     # (vervangen door Image.LANCZOS), maar python-barcode's ImageWriter
     # verwijst er intern nog naar. Zonder deze patch crasht het genereren
     # met "module 'PIL.Image' has no attribute 'ANTIALIAS'".
     if not hasattr(PILImage, "ANTIALIAS"):
         PILImage.ANTIALIAS = PILImage.LANCZOS
-    
+
     barcode_config = barcode_config or {}
     writer_options = {
         "module_width": barcode_config.get("module_width_mm", 0.4),
@@ -500,7 +561,7 @@ def genereer_barcode(artikelnummer, output_folder, barcode_config=None):
 
 def print_barcode(image_path, printer_config):
     """Print de barcode-afbeelding.
-    
+
     Twee methoden:
     - 'brother_ql': praat rechtstreeks (via USB) met een Brother QL-serie
       printer met de brother_ql-library. Dit is de juiste aanpak voor een
@@ -514,7 +575,7 @@ def print_barcode(image_path, printer_config):
       pagina-instelling van de driver.
     """
     methode = printer_config.get("print_method", "cups")
-    
+
     if methode == "brother_ql":
         _print_barcode_brother_ql(image_path, printer_config)
     else:
@@ -541,7 +602,7 @@ def _print_barcode_brother_ql(image_path, printer_config):
             "brother_ql is niet geïnstalleerd. Installeer met:\n"
             "pip install brother_ql --break-system-packages"
         )
-    
+
     model = printer_config.get("brother_ql_model", "QL-500")
     label_size = printer_config.get("brother_ql_label", "62")  # 62mm continu
     identifier = printer_config.get("brother_ql_identifier", "")
@@ -550,7 +611,7 @@ def _print_barcode_brother_ql(image_path, printer_config):
             "Geen USB-identifier ingesteld voor brother_ql.\n"
             "Vind 'm met: python3 -m brother_ql discover"
         )
-    
+
     from PIL import Image
     with Image.open(image_path) as img:
         qlr = BrotherQLRaster(model)
@@ -583,6 +644,225 @@ def get_cups_printers():
 
 
 # ============================================
+# LOGIN & GEBRUIKERSBEHEER-DIALOGEN
+# ============================================
+class NieuweGebruikerDialog(Gtk.Dialog):
+    """Dialoog om een nieuwe gebruiker (naam + wachtwoord) aan te maken."""
+    def __init__(self, parent, titel="Nieuwe gebruiker"):
+        super().__init__(title=titel, transient_for=parent, flags=0)
+        self.set_default_size(320, 180)
+        self.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
+
+        box = self.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(12)
+
+        box.pack_start(Gtk.Label(label="Gebruikersnaam:", xalign=0), False, False, 0)
+        self.naam_entry = Gtk.Entry()
+        box.pack_start(self.naam_entry, False, False, 0)
+
+        box.pack_start(Gtk.Label(label="Wachtwoord:", xalign=0), False, False, 0)
+        self.wachtwoord_entry = Gtk.Entry()
+        self.wachtwoord_entry.set_visibility(False)
+        box.pack_start(self.wachtwoord_entry, False, False, 0)
+
+        box.pack_start(Gtk.Label(label="Herhaal wachtwoord:", xalign=0), False, False, 0)
+        self.wachtwoord2_entry = Gtk.Entry()
+        self.wachtwoord2_entry.set_visibility(False)
+        box.pack_start(self.wachtwoord2_entry, False, False, 0)
+
+        self.foutlabel = Gtk.Label()
+        self.foutlabel.set_markup("<span foreground='red'></span>")
+        box.pack_start(self.foutlabel, False, False, 0)
+
+        self.show_all()
+
+    def get_invoer(self):
+        return (
+            self.naam_entry.get_text().strip(),
+            self.wachtwoord_entry.get_text(),
+            self.wachtwoord2_entry.get_text(),
+        )
+
+    def toon_fout(self, msg):
+        self.foutlabel.set_markup(f"<span foreground='red'>{msg}</span>")
+
+
+class LoginDialog(Gtk.Dialog):
+    """Inlogscherm - verschijnt vóór het hoofdvenster. Gebruik via:
+        while True:
+            response = login.run()
+            if response != Gtk.ResponseType.OK:
+                ... afsluiten ...
+            if user_manager.controleer(login.get_naam(), login.get_wachtwoord()):
+                break
+            login.toon_fout(...)
+    """
+    def __init__(self, user_manager):
+        super().__init__(title="Inloggen - Marktplaats Product Manager")
+        self.user_manager = user_manager
+        self.set_default_size(320, 220)
+        self.set_position(Gtk.WindowPosition.CENTER)
+
+        box = self.get_content_area()
+        box.set_spacing(10)
+        box.set_border_width(20)
+
+        titel = Gtk.Label()
+        titel.set_markup("<b>Marktplaats Product Manager</b>")
+        box.pack_start(titel, False, False, 0)
+
+        box.pack_start(Gtk.Label(label="Gebruikersnaam:", xalign=0), False, False, 0)
+        self.naam_combo = Gtk.ComboBoxText.new_with_entry()
+        for naam in user_manager.gebruikersnamen():
+            self.naam_combo.append_text(naam)
+        box.pack_start(self.naam_combo, False, False, 0)
+
+        box.pack_start(Gtk.Label(label="Wachtwoord:", xalign=0), False, False, 0)
+        self.wachtwoord_entry = Gtk.Entry()
+        self.wachtwoord_entry.set_visibility(False)
+        self.wachtwoord_entry.connect("activate", lambda w: self.response(Gtk.ResponseType.OK))
+        box.pack_start(self.wachtwoord_entry, False, False, 0)
+
+        self.foutlabel = Gtk.Label()
+        box.pack_start(self.foutlabel, False, False, 0)
+
+        nieuw_btn = Gtk.Button(label="Nieuwe gebruiker aanmaken")
+        nieuw_btn.connect("clicked", self._on_nieuwe_gebruiker)
+        box.pack_start(nieuw_btn, False, False, 5)
+
+        self.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, "Inloggen", Gtk.ResponseType.OK)
+
+        self.show_all()
+
+    def get_naam(self):
+        tekst = self.naam_combo.get_active_text()
+        return tekst.strip() if tekst else ""
+
+    def get_wachtwoord(self):
+        return self.wachtwoord_entry.get_text()
+
+    def toon_fout(self, msg):
+        self.foutlabel.set_markup(f"<span foreground='red'>{msg}</span>")
+
+    def _on_nieuwe_gebruiker(self, widget):
+        dialog = NieuweGebruikerDialog(self)
+        while True:
+            response = dialog.run()
+            if response != Gtk.ResponseType.OK:
+                break
+            naam, ww1, ww2 = dialog.get_invoer()
+            if not naam:
+                dialog.toon_fout("Vul een gebruikersnaam in.")
+                continue
+            if naam in self.user_manager.gebruikersnamen():
+                dialog.toon_fout("Deze gebruikersnaam bestaat al.")
+                continue
+            if not ww1 or ww1 != ww2:
+                dialog.toon_fout("Wachtwoorden komen niet overeen.")
+                continue
+            self.user_manager.voeg_toe(naam, ww1)
+            self.naam_combo.append_text(naam)
+            self.naam_combo.set_active(len(self.user_manager.gebruikersnamen()) - 1)
+            break
+        dialog.destroy()
+
+
+class UsersDialog(Gtk.Dialog):
+    """Gebruikers beheren (toevoegen/verwijderen) vanuit de hoofd-app."""
+    def __init__(self, parent, user_manager, huidige_gebruiker):
+        super().__init__(title="Gebruikers beheren", transient_for=parent, flags=0)
+        self.user_manager = user_manager
+        self.huidige_gebruiker = huidige_gebruiker
+        self.set_default_size(320, 300)
+        self.add_buttons(Gtk.STOCK_CLOSE, Gtk.ResponseType.CLOSE)
+
+        box = self.get_content_area()
+        box.set_spacing(8)
+        box.set_border_width(12)
+
+        self.store = Gtk.ListStore(str)
+        self.tree_view = Gtk.TreeView(model=self.store)
+        renderer = Gtk.CellRendererText()
+        self.tree_view.append_column(Gtk.TreeViewColumn("Gebruikersnaam", renderer, text=0))
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_size_request(-1, 180)
+        scroll.add(self.tree_view)
+        box.pack_start(scroll, True, True, 0)
+
+        knoppen_row = Gtk.Box(spacing=5)
+        toevoegen_btn = Gtk.Button(label="➕ Toevoegen")
+        toevoegen_btn.connect("clicked", self._on_toevoegen)
+        knoppen_row.pack_start(toevoegen_btn, False, False, 0)
+
+        verwijder_btn = Gtk.Button(label="🗑️ Verwijderen")
+        verwijder_btn.connect("clicked", self._on_verwijderen)
+        knoppen_row.pack_start(verwijder_btn, False, False, 0)
+        box.pack_start(knoppen_row, False, False, 0)
+
+        self._herlaad()
+        self.show_all()
+
+    def _herlaad(self):
+        self.store.clear()
+        for naam in self.user_manager.gebruikersnamen():
+            self.store.append([naam])
+
+    def _on_toevoegen(self, widget):
+        dialog = NieuweGebruikerDialog(self)
+        while True:
+            response = dialog.run()
+            if response != Gtk.ResponseType.OK:
+                break
+            naam, ww1, ww2 = dialog.get_invoer()
+            if not naam:
+                dialog.toon_fout("Vul een gebruikersnaam in.")
+                continue
+            if naam in self.user_manager.gebruikersnamen():
+                dialog.toon_fout("Deze gebruikersnaam bestaat al.")
+                continue
+            if not ww1 or ww1 != ww2:
+                dialog.toon_fout("Wachtwoorden komen niet overeen.")
+                continue
+            self.user_manager.voeg_toe(naam, ww1)
+            self._herlaad()
+            break
+        dialog.destroy()
+
+    def _on_verwijderen(self, widget):
+        selection = self.tree_view.get_selection()
+        model, treeiter = selection.get_selected()
+        if treeiter is None:
+            return
+        naam = model[treeiter][0]
+        if naam == self.huidige_gebruiker:
+            confirm = Gtk.MessageDialog(
+                transient_for=self, flags=0, message_type=Gtk.MessageType.WARNING,
+                buttons=Gtk.ButtonsType.OK, text="Je kan de gebruiker waarmee je nu bent ingelogd niet verwijderen."
+            )
+            confirm.run()
+            confirm.destroy()
+            return
+        if len(self.user_manager.gebruikersnamen()) <= 1:
+            confirm = Gtk.MessageDialog(
+                transient_for=self, flags=0, message_type=Gtk.MessageType.WARNING,
+                buttons=Gtk.ButtonsType.OK, text="Er moet minstens één gebruiker overblijven."
+            )
+            confirm.run()
+            confirm.destroy()
+            return
+        confirm = Gtk.MessageDialog(
+            transient_for=self, flags=0, message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO, text=f"Gebruiker '{naam}' verwijderen?"
+        )
+        response = confirm.run()
+        confirm.destroy()
+        if response == Gtk.ResponseType.YES:
+            self.user_manager.verwijder(naam)
+            self._herlaad()
+
+
+# ============================================
 # INSTELLINGEN-DIALOOG
 # ============================================
 class SettingsDialog(Gtk.Dialog):
@@ -591,51 +871,51 @@ class SettingsDialog(Gtk.Dialog):
         self.config = config
         self.set_default_size(560, 640)
         self.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_SAVE, Gtk.ResponseType.OK)
-        
+
         box = self.get_content_area()
         box.set_spacing(10)
         box.set_border_width(15)
-        
+
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         box.pack_start(scrolled, True, True, 0)
-        
+
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         inner.set_border_width(5)
         scrolled.add(inner)
-        
+
         # --- Opslagmethode ---
         inner.pack_start(self._section_label("Opslagmethode (kies er één)"), False, False, 0)
-        
+
         self.backend_combo = Gtk.ComboBoxText()
         self.backend_combo.append("xml", "Lokaal XML-bestand")
         self.backend_combo.append("sheets", "Google Sheets")
         self.backend_combo.set_active_id(config.get("storage_backend", "xml"))
         inner.pack_start(self.backend_combo, False, False, 0)
-        
+
         warning = Gtk.Label()
         warning.set_markup("<small><i>⚠️ Zorg dat deze keuze overeenkomt met wat auto_marktplaats.py gebruikt - beide apps moeten dezelfde opslag lezen.</i></small>")
         warning.set_xalign(0)
         warning.set_line_wrap(True)
         inner.pack_start(warning, False, False, 0)
-        
+
         inner.pack_start(Gtk.Label(label="XML-bestandspad:"), False, False, 0)
         self.xml_path_entry = Gtk.Entry()
         self.xml_path_entry.set_text(config.get("xml_path", ""))
         inner.pack_start(self.xml_path_entry, False, False, 0)
-        
+
         inner.pack_start(Gtk.Label(label="Google Sheets URL:"), False, False, 0)
         self.sheet_url_entry = Gtk.Entry()
         self.sheet_url_entry.set_text(config.get("sheets", {}).get("sheet_url", ""))
         inner.pack_start(self.sheet_url_entry, False, False, 0)
-        
+
         inner.pack_start(Gtk.Label(label="credentials.json pad:"), False, False, 0)
         self.creds_entry = Gtk.Entry()
         self.creds_entry.set_text(config.get("sheets", {}).get("credentials_file", ""))
         inner.pack_start(self.creds_entry, False, False, 0)
-        
+
         inner.pack_start(Gtk.Separator(), False, False, 5)
-        
+
         # --- Basis-map ---
         inner.pack_start(self._section_label("Basismap voor productmappen"), False, False, 0)
         base_warn = Gtk.Label()
@@ -643,13 +923,13 @@ class SettingsDialog(Gtk.Dialog):
         base_warn.set_xalign(0)
         base_warn.set_line_wrap(True)
         inner.pack_start(base_warn, False, False, 0)
-        
+
         self.base_folder_entry = Gtk.Entry()
         self.base_folder_entry.set_text(config.get("base_folder", ""))
         inner.pack_start(self.base_folder_entry, False, False, 0)
-        
+
         inner.pack_start(Gtk.Separator(), False, False, 5)
-        
+
         # --- Categorieën ---
         inner.pack_start(self._section_label("Categorieën (één per regel)"), False, False, 0)
         self.categorieen_view = Gtk.TextView()
@@ -658,7 +938,7 @@ class SettingsDialog(Gtk.Dialog):
         cat_scroll.set_size_request(-1, 100)
         cat_scroll.add(self.categorieen_view)
         inner.pack_start(cat_scroll, False, False, 0)
-        
+
         # --- Tijdsperiodes ---
         inner.pack_start(self._section_label("Tijdsperiodes (één per regel)"), False, False, 0)
         self.tijdsperiodes_view = Gtk.TextView()
@@ -667,9 +947,9 @@ class SettingsDialog(Gtk.Dialog):
         tp_scroll.set_size_request(-1, 100)
         tp_scroll.add(self.tijdsperiodes_view)
         inner.pack_start(tp_scroll, False, False, 0)
-        
+
         inner.pack_start(Gtk.Separator(), False, False, 5)
-        
+
         # --- Opslaglocatie-codes ---
         inner.pack_start(self._section_label("Opslaglocatie-codes (naam=code, 1 teken, één per regel)"), False, False, 0)
         loc_hint = Gtk.Label()
@@ -677,7 +957,7 @@ class SettingsDialog(Gtk.Dialog):
         loc_hint.set_xalign(0)
         loc_hint.set_line_wrap(True)
         inner.pack_start(loc_hint, False, False, 0)
-        
+
         self.opslaglocatie_view = Gtk.TextView()
         self.opslaglocatie_view.get_buffer().set_text(
             "\n".join(f"{k}={v}" for k, v in config.get("opslaglocatie_codes", {}).items())
@@ -686,7 +966,7 @@ class SettingsDialog(Gtk.Dialog):
         loc_scroll.set_size_request(-1, 80)
         loc_scroll.add(self.opslaglocatie_view)
         inner.pack_start(loc_scroll, False, False, 0)
-        
+
         inner.pack_start(Gtk.Label(label="Sublocatie-codes (naam=code):"), False, False, 0)
         self.sublocatie_view = Gtk.TextView()
         self.sublocatie_view.get_buffer().set_text(
@@ -696,7 +976,7 @@ class SettingsDialog(Gtk.Dialog):
         sub_scroll.set_size_request(-1, 80)
         sub_scroll.add(self.sublocatie_view)
         inner.pack_start(sub_scroll, False, False, 0)
-        
+
         inner.pack_start(Gtk.Label(label="Rij-codes (naam=code):"), False, False, 0)
         self.rij_view = Gtk.TextView()
         self.rij_view.get_buffer().set_text(
@@ -706,9 +986,9 @@ class SettingsDialog(Gtk.Dialog):
         rij_scroll.set_size_request(-1, 80)
         rij_scroll.add(self.rij_view)
         inner.pack_start(rij_scroll, False, False, 0)
-        
+
         inner.pack_start(Gtk.Separator(), False, False, 5)
-        
+
         # --- Labelprinter ---
         inner.pack_start(self._section_label("Labelprinter (barcode)"), False, False, 0)
         printer_hint = Gtk.Label()
@@ -716,13 +996,13 @@ class SettingsDialog(Gtk.Dialog):
         printer_hint.set_xalign(0)
         printer_hint.set_line_wrap(True)
         inner.pack_start(printer_hint, False, False, 0)
-        
+
         self.printer_enabled_check = Gtk.CheckButton(label="Direct printen inschakelen")
         self.printer_enabled_check.set_active(config.get("printer", {}).get("enabled", False))
         inner.pack_start(self.printer_enabled_check, False, False, 0)
-        
+
         printer_cfg = config.get("printer", {})
-        
+
         method_row = Gtk.Box(spacing=5)
         method_row.pack_start(Gtk.Label(label="Methode:"), False, False, 0)
         self.print_method_combo = Gtk.ComboBoxText()
@@ -732,11 +1012,11 @@ class SettingsDialog(Gtk.Dialog):
         self.print_method_combo.connect("changed", self._on_print_method_changed)
         method_row.pack_start(self.print_method_combo, False, False, 0)
         inner.pack_start(method_row, False, False, 0)
-        
+
         # CUPS-specifieke velden
         self.cups_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         inner.pack_start(self.cups_box, False, False, 0)
-        
+
         printer_row = Gtk.Box(spacing=5)
         printer_row.pack_start(Gtk.Label(label="Printer:"), False, False, 0)
         self.printer_combo = Gtk.ComboBoxText()
@@ -747,32 +1027,32 @@ class SettingsDialog(Gtk.Dialog):
             self.printer_combo.prepend_text(huidige_printer)
         self.printer_combo.set_active(0)
         printer_row.pack_start(self.printer_combo, True, True, 0)
-        
+
         refresh_btn = Gtk.Button(label="🔄")
         refresh_btn.connect("clicked", self._refresh_printers)
         printer_row.pack_start(refresh_btn, False, False, 0)
-        
+
         self.cups_box.pack_start(printer_row, False, False, 0)
         cups_hint = Gtk.Label()
         cups_hint.set_markup("<small><i>⚠️ Op de QL-500 gaf een aangepaste paginagrootte een media-mismatch-fout (snel knipperend lampje). Gebruik hiervoor liever de brother_ql-methode hieronder.</i></small>")
         cups_hint.set_xalign(0)
         cups_hint.set_line_wrap(True)
         self.cups_box.pack_start(cups_hint, False, False, 0)
-        
+
         # brother_ql-specifieke velden
         self.brother_ql_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         inner.pack_start(self.brother_ql_box, False, False, 0)
-        
+
         bq_grid = Gtk.Grid()
         bq_grid.set_column_spacing(10)
         bq_grid.set_row_spacing(5)
         self.brother_ql_box.pack_start(bq_grid, False, False, 0)
-        
+
         bq_grid.attach(Gtk.Label(label="Model:", xalign=0), 0, 0, 1, 1)
         self.bq_model_entry = Gtk.Entry()
         self.bq_model_entry.set_text(printer_cfg.get("brother_ql_model", "QL-500"))
         bq_grid.attach(self.bq_model_entry, 1, 0, 1, 1)
-        
+
         bq_grid.attach(Gtk.Label(label="Labelformaat:", xalign=0), 0, 1, 1, 1)
         self.bq_label_entry = Gtk.Entry()
         self.bq_label_entry.set_text(printer_cfg.get("brother_ql_label", "62"))
@@ -781,19 +1061,19 @@ class SettingsDialog(Gtk.Dialog):
         bq_label_hint.set_markup("<small><i>'62' = 62mm continue rol</i></small>")
         bq_label_hint.set_xalign(0)
         bq_grid.attach(bq_label_hint, 2, 1, 1, 1)
-        
+
         bq_grid.attach(Gtk.Label(label="USB-identifier:", xalign=0), 0, 2, 1, 1)
         self.bq_identifier_entry = Gtk.Entry()
         self.bq_identifier_entry.set_text(printer_cfg.get("brother_ql_identifier", ""))
         self.bq_identifier_entry.set_placeholder_text("bijv. usb://0x04f9:0x2015/000M6Z401370")
         bq_grid.attach(self.bq_identifier_entry, 1, 2, 1, 1)
-        
+
         bq_find_btn = Gtk.Button(label="🔍 Zoek printer")
         bq_find_btn.connect("clicked", self._discover_brother_ql)
         self.brother_ql_box.pack_start(bq_find_btn, False, False, 0)
-        
+
         self._on_print_method_changed(self.print_method_combo)
-        
+
 
         # --- Barcode-afmetingen ---
         size_hint = Gtk.Label()
@@ -807,14 +1087,14 @@ class SettingsDialog(Gtk.Dialog):
         size_hint.set_line_wrap(True)
         size_hint.set_margin_top(8)
         inner.pack_start(size_hint, False, False, 0)
-        
+
         barcode_cfg = config.get("barcode", {})
-        
+
         size_grid = Gtk.Grid()
         size_grid.set_column_spacing(10)
         size_grid.set_row_spacing(5)
         inner.pack_start(size_grid, False, False, 0)
-        
+
         size_grid.attach(Gtk.Label(label="Streepdikte (mm):", xalign=0), 0, 0, 1, 1)
         self.module_width_entry = Gtk.Entry()
         self.module_width_entry.set_text(str(barcode_cfg.get("module_width_mm", 0.4)))
@@ -823,7 +1103,7 @@ class SettingsDialog(Gtk.Dialog):
         width_hint.set_markup("<small><i>hoger = breder totaal + beter leesbaar</i></small>")
         width_hint.set_xalign(0)
         size_grid.attach(width_hint, 2, 0, 1, 1)
-        
+
         size_grid.attach(Gtk.Label(label="Streephoogte (mm):", xalign=0), 0, 1, 1, 1)
         self.module_height_entry = Gtk.Entry()
         self.module_height_entry.set_text(str(barcode_cfg.get("module_height_mm", 7.0)))
@@ -832,7 +1112,7 @@ class SettingsDialog(Gtk.Dialog):
         height_hint.set_markup("<small><i>standaard (python-barcode) is 15mm</i></small>")
         height_hint.set_xalign(0)
         size_grid.attach(height_hint, 2, 1, 1, 1)
-        
+
         size_grid.attach(Gtk.Label(label="Marge/quiet zone (mm):", xalign=0), 0, 2, 1, 1)
         self.quiet_zone_entry = Gtk.Entry()
         self.quiet_zone_entry.set_text(str(barcode_cfg.get("quiet_zone_mm", 2.0)))
@@ -841,14 +1121,14 @@ class SettingsDialog(Gtk.Dialog):
         qz_hint.set_markup("<small><i>kleiner = meer van de rolbreedte benut</i></small>")
         qz_hint.set_xalign(0)
         size_grid.attach(qz_hint, 2, 2, 1, 1)
-        
+
         self.show_all()
-    
+
     def _on_print_method_changed(self, widget):
         is_brother_ql = self.print_method_combo.get_active_id() == "brother_ql"
         self.cups_box.set_visible(not is_brother_ql)
         self.brother_ql_box.set_visible(is_brother_ql)
-    
+
     def _discover_brother_ql(self, widget):
         try:
             result = subprocess.run(
@@ -870,7 +1150,7 @@ class SettingsDialog(Gtk.Dialog):
             self._toon_info_dialoog("brother_ql is niet geïnstalleerd. Installeer met:\npip install brother_ql --break-system-packages")
         except Exception as e:
             self._toon_info_dialoog(f"Fout bij zoeken: {e}")
-    
+
     def _toon_info_dialoog(self, msg):
         dialog = Gtk.MessageDialog(
             transient_for=self, flags=0, message_type=Gtk.MessageType.INFO,
@@ -878,19 +1158,19 @@ class SettingsDialog(Gtk.Dialog):
         )
         dialog.run()
         dialog.destroy()
-    
+
     def _refresh_printers(self, widget):
         self.printer_combo.remove_all()
         for p in get_cups_printers():
             self.printer_combo.append_text(p)
         self.printer_combo.set_active(0)
-    
+
     def _section_label(self, text):
         label = Gtk.Label()
         label.set_markup(f"<b>{text}</b>")
         label.set_xalign(0)
         return label
-    
+
     def _parse_key_value_lines(self, textview):
         buf = textview.get_buffer()
         text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
@@ -901,12 +1181,12 @@ class SettingsDialog(Gtk.Dialog):
                 k, v = line.split("=", 1)
                 result[k.strip()] = v.strip()
         return result
-    
+
     def _parse_lines(self, textview):
         buf = textview.get_buffer()
         text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
         return [l.strip() for l in text.splitlines() if l.strip()]
-    
+
     def apply_to_config(self):
         self.config.set("storage_backend", self.backend_combo.get_active_id())
         self.config.set("xml_path", self.xml_path_entry.get_text().strip())
@@ -929,13 +1209,13 @@ class SettingsDialog(Gtk.Dialog):
             "brother_ql_label": self.bq_label_entry.get_text().strip(),
             "brother_ql_identifier": self.bq_identifier_entry.get_text().strip(),
         })
-        
+
         def _safe_float(entry, default):
             try:
                 return float(entry.get_text().strip().replace(",", "."))
             except ValueError:
                 return default
-        
+
         self.config.set("barcode", {
             "module_width_mm": _safe_float(self.module_width_entry, 0.4),
             "module_height_mm": _safe_float(self.module_height_entry, 7.0),
@@ -952,18 +1232,18 @@ class RegistreerTab(Gtk.Box):
         self.main_window = main_window
         self.config = main_window.config
         self.set_border_width(15)
-        
+
         self.condition_checks = {}  # widgets per staat-detail optie
         self.condition_box = None
-        
+
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.pack_start(scrolled, True, True, 0)
-        
+
         form = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         form.set_border_width(5)
         scrolled.add(form)
-        
+
         # Titel
         form.pack_start(self._label("Titel (max 60 tekens)"), False, False, 0)
         title_row = Gtk.Box(spacing=5)
@@ -974,7 +1254,7 @@ class RegistreerTab(Gtk.Box):
         self.titel_counter = Gtk.Label(label=f"0/{MAX_TITEL_LENGTE}")
         title_row.pack_start(self.titel_counter, False, False, 0)
         form.pack_start(title_row, False, False, 0)
-        
+
         # Omschrijving
         form.pack_start(self._label("Omschrijving"), False, False, 0)
         self.omschrijving_view = Gtk.TextView()
@@ -983,7 +1263,7 @@ class RegistreerTab(Gtk.Box):
         omschrijving_scroll.set_size_request(-1, 100)
         omschrijving_scroll.add(self.omschrijving_view)
         form.pack_start(omschrijving_scroll, False, False, 0)
-        
+
         # Categorie & Tijdsperiode
         cat_row = Gtk.Box(spacing=10)
         cat_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
@@ -993,7 +1273,7 @@ class RegistreerTab(Gtk.Box):
             self.categorie_combo.append_text(c)
         cat_col.pack_start(self.categorie_combo, False, False, 0)
         cat_row.pack_start(cat_col, True, True, 0)
-        
+
         tp_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         tp_col.pack_start(self._label("Tijdsperiode"), False, False, 0)
         self.tijdsperiode_combo = Gtk.ComboBoxText.new_with_entry()
@@ -1002,7 +1282,7 @@ class RegistreerTab(Gtk.Box):
         tp_col.pack_start(self.tijdsperiode_combo, False, False, 0)
         cat_row.pack_start(tp_col, True, True, 0)
         form.pack_start(cat_row, False, False, 0)
-        
+
         # Conditie
         form.pack_start(self._label("Staat van het artikel"), False, False, 0)
         self.conditie_combo = Gtk.ComboBoxText()
@@ -1010,14 +1290,14 @@ class RegistreerTab(Gtk.Box):
             self.conditie_combo.append_text(c)
         self.conditie_combo.connect("changed", self._on_conditie_changed)
         form.pack_start(self.conditie_combo, False, False, 0)
-        
+
         self.condition_details_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         form.pack_start(self.condition_details_container, False, False, 0)
-        
+
         self.staat_details_extra_entry = Gtk.Entry()
         self.staat_details_extra_entry.set_placeholder_text("Overige staat-details (optioneel, vrije tekst)")
         form.pack_start(self.staat_details_extra_entry, False, False, 0)
-        
+
         # Afmetingen & gewicht
         form.pack_start(self._label("Afmetingen (cm) en gewicht (kg)"), False, False, 0)
         dim_row = Gtk.Box(spacing=5)
@@ -1028,7 +1308,7 @@ class RegistreerTab(Gtk.Box):
         for e in (self.lengte_entry, self.breedte_entry, self.hoogte_entry, self.gewicht_entry):
             dim_row.pack_start(e, True, True, 0)
         form.pack_start(dim_row, False, False, 0)
-        
+
         # Waarde & vraagprijs
         form.pack_start(self._label("Geschatte waarde en vraagprijs (€)"), False, False, 0)
         waarde_row = Gtk.Box(spacing=5)
@@ -1038,7 +1318,7 @@ class RegistreerTab(Gtk.Box):
         for e in (self.waarde_min_entry, self.waarde_max_entry, self.vraagprijs_entry):
             waarde_row.pack_start(e, True, True, 0)
         form.pack_start(waarde_row, False, False, 0)
-        
+
         # Opslaglocatie / Sublocatie / Rij
         form.pack_start(self._label("Opslaglocatie (bepaalt de eerste 3 tekens van het artikelnummer)"), False, False, 0)
         loc_row = Gtk.Box(spacing=5)
@@ -1046,18 +1326,18 @@ class RegistreerTab(Gtk.Box):
         for naam in self.config.get("opslaglocatie_codes", {}).keys():
             self.opslaglocatie_combo.append_text(naam)
         loc_row.pack_start(self.opslaglocatie_combo, True, True, 0)
-        
+
         self.sublocatie_combo = Gtk.ComboBoxText()
         for naam in self.config.get("sublocatie_codes", {}).keys():
             self.sublocatie_combo.append_text(naam)
         loc_row.pack_start(self.sublocatie_combo, True, True, 0)
-        
+
         self.rij_combo = Gtk.ComboBoxText()
         for naam in self.config.get("rij_codes", {}).keys():
             self.rij_combo.append_text(naam)
         loc_row.pack_start(self.rij_combo, True, True, 0)
         form.pack_start(loc_row, False, False, 0)
-        
+
         warning_label = Gtk.Label()
         warning_label.set_markup(
             "<small><i>⚠️ Zorg dat de basismap-instelling overeenkomt met marktplaats_manager, "
@@ -1066,44 +1346,44 @@ class RegistreerTab(Gtk.Box):
         warning_label.set_xalign(0)
         warning_label.set_line_wrap(True)
         form.pack_start(warning_label, False, False, 5)
-        
+
         # Barcode
         self.barcode_check = Gtk.CheckButton(label="Barcode genereren bij opslaan")
         self.barcode_check.set_active(True)
         form.pack_start(self.barcode_check, False, False, 0)
-        
+
         # Opslaan-knop
         self.opslaan_btn = Gtk.Button(label="💾 Product registreren")
         self.opslaan_btn.connect("clicked", self._on_opslaan)
         form.pack_start(self.opslaan_btn, False, False, 10)
-        
+
         self.status_label = Gtk.Label()
         self.status_label.set_xalign(0)
         self.status_label.set_line_wrap(True)
         form.pack_start(self.status_label, False, False, 0)
-        
+
         self._on_conditie_changed(self.conditie_combo)
-    
+
     def _label(self, text):
         label = Gtk.Label()
         label.set_markup(f"<b>{text}</b>")
         label.set_xalign(0)
         return label
-    
+
     def _number_entry(self, placeholder):
         entry = Gtk.Entry()
         entry.set_placeholder_text(placeholder)
         return entry
-    
+
     def _on_titel_changed(self, widget):
         length = len(widget.get_text())
         self.titel_counter.set_text(f"{length}/{MAX_TITEL_LENGTE}")
-    
+
     def _on_conditie_changed(self, widget):
         for child in self.condition_details_container.get_children():
             self.condition_details_container.remove(child)
         self.condition_checks = {}
-        
+
         conditie = widget.get_active_text()
         opties = STAAT_DETAILS.get(conditie, [])
         for optie in opties:
@@ -1111,14 +1391,14 @@ class RegistreerTab(Gtk.Box):
             self.condition_checks[optie] = check
             self.condition_details_container.pack_start(check, False, False, 0)
         self.condition_details_container.show_all()
-    
+
     def _verzamel_staat_details(self):
         geselecteerd = [naam for naam, check in self.condition_checks.items() if check.get_active()]
         extra = self.staat_details_extra_entry.get_text().strip()
         if extra:
             geselecteerd.append(extra)
         return ", ".join(geselecteerd)
-    
+
     def _reset_form(self):
         self.titel_entry.set_text("")
         self.omschrijving_view.get_buffer().set_text("")
@@ -1129,7 +1409,7 @@ class RegistreerTab(Gtk.Box):
         for e in (self.lengte_entry, self.breedte_entry, self.hoogte_entry, self.gewicht_entry,
                   self.waarde_min_entry, self.waarde_max_entry, self.vraagprijs_entry):
             e.set_text("")
-    
+
     def _on_opslaan(self, widget):
         titel = self.titel_entry.get_text().strip()
         if not titel:
@@ -1138,23 +1418,23 @@ class RegistreerTab(Gtk.Box):
         if len(titel) > MAX_TITEL_LENGTE:
             self._toon_fout(f"Titel mag maximaal {MAX_TITEL_LENGTE} tekens zijn.")
             return
-        
+
         opslaglocatie_naam = self.opslaglocatie_combo.get_active_text()
         sublocatie_naam = self.sublocatie_combo.get_active_text()
         rij_naam = self.rij_combo.get_active_text()
         if not (opslaglocatie_naam and sublocatie_naam and rij_naam):
             self._toon_fout("Kies een opslaglocatie, sublocatie en rij.")
             return
-        
+
         opslaglocatie_code = self.config.get("opslaglocatie_codes", {}).get(opslaglocatie_naam, "X")
         sublocatie_code = self.config.get("sublocatie_codes", {}).get(sublocatie_naam, "X")
         rij_code = self.config.get("rij_codes", {}).get(rij_naam, "X")
-        
+
         buf = self.omschrijving_view.get_buffer()
         omschrijving = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
-        
+
         storage = get_backend(self.config)
-        
+
         try:
             artikelnummer = generate_artikelnummer(
                 self.config, storage, opslaglocatie_code, sublocatie_code, rij_code
@@ -1162,7 +1442,7 @@ class RegistreerTab(Gtk.Box):
         except Exception as e:
             self._toon_fout(f"Kon artikelnummer niet genereren: {e}")
             return
-        
+
         product = {col: "" for col in COLUMNS}
         product.update({
             "artikelnummer": artikelnummer,
@@ -1186,15 +1466,16 @@ class RegistreerTab(Gtk.Box):
             "verkocht": "nee",
             "online": "nee",
             "algemene_voorwaarden": "",  # leeg = auto_marktplaats.py gebruikt de vaste tekst
+            "verwerkt_door": self.main_window.gebruikersnaam,
         })
-        
+
         try:
             folder, bestond_al = maak_product_map(self.config, product)
             product["folder_locatie"] = folder
         except Exception as e:
             self._toon_fout(f"Kon productmap niet aanmaken: {e}")
             return
-        
+
         barcode_msg = ""
         if self.barcode_check.get_active():
             try:
@@ -1208,13 +1489,13 @@ class RegistreerTab(Gtk.Box):
                     barcode_msg += f"\n🖨️ Verstuurd naar printer '{doel}'"
             except Exception as e:
                 barcode_msg = f"\n⚠️ Barcode-fout: {e}"
-        
+
         try:
             storage.add_product(product)
         except Exception as e:
             self._toon_fout(f"Kon niet opslaan naar opslag-backend: {e}")
             return
-        
+
         map_msg = "Bestaande map hergebruikt" if bestond_al else "Nieuwe map aangemaakt"
         self.status_label.set_markup(
             f"<span foreground='green'>✅ Product <b>{artikelnummer}</b> geregistreerd.\n"
@@ -1222,7 +1503,8 @@ class RegistreerTab(Gtk.Box):
         )
         self._reset_form()
         self.main_window.overzicht_tab.herlaad()
-    
+        self.main_window.notebook.set_current_page(1)  # spring naar Overzicht-tab
+
     def _toon_fout(self, msg):
         self.status_label.set_markup(f"<span foreground='red'>❌ {msg}</span>")
 
@@ -1231,11 +1513,11 @@ class RegistreerTab(Gtk.Box):
 # TAB 2: OVERZICHT
 # ============================================
 OVERZICHT_KOLOMMEN = ["artikelnummer", "titel", "categorie", "conditie", "vraagprijs",
-                      "aanmaakdatum", "online", "advertentie_url", "verkocht", "verkoopprijs",
-                      "verkoopdatum", "leverwijze", "klant_naam"]
+                      "aanmaakdatum", "verwerkt_door", "online", "advertentie_url", "verkocht",
+                      "verkoopprijs", "verkoopdatum", "leverwijze", "klant_naam"]
 OVERZICHT_LABELS = ["Artikelnummer", "Titel", "Categorie", "Conditie", "Vraagprijs",
-                    "Aanmaakdatum", "Online", "Advertentie-URL", "Verkocht", "Verkoopprijs",
-                    "Verkoopdatum", "Leverwijze", "Klant"]
+                    "Aanmaakdatum", "Verwerkt door", "Online", "Advertentie-URL", "Verkocht",
+                    "Verkoopprijs", "Verkoopdatum", "Leverwijze", "Klant"]
 
 
 class OverzichtTab(Gtk.Box):
@@ -1244,7 +1526,7 @@ class OverzichtTab(Gtk.Box):
         self.main_window = main_window
         self.config = main_window.config
         self.set_border_width(15)
-        
+
         # Filter-knoppen
         filter_row = Gtk.Box(spacing=5)
         self.filter_alles_btn = Gtk.RadioButton.new_with_label_from_widget(None, "Alles")
@@ -1255,56 +1537,57 @@ class OverzichtTab(Gtk.Box):
         for btn in (self.filter_alles_btn, self.filter_offline_btn, self.filter_online_btn, self.filter_verkocht_btn):
             btn.connect("toggled", lambda w: self.herlaad())
             filter_row.pack_start(btn, False, False, 0)
-        
+
         refresh_btn = Gtk.Button(label="🔄 Vernieuwen")
         refresh_btn.connect("clicked", lambda w: self.herlaad())
         filter_row.pack_start(refresh_btn, False, False, 10)
-        
+
         self.pack_start(filter_row, False, False, 0)
-        
+
         # Tabel
         self.store = Gtk.ListStore(*([str] * len(OVERZICHT_KOLOMMEN)))
         self.tree_view = Gtk.TreeView(model=self.store)
         self.tree_view.set_search_column(0)
-        
+        self.tree_view.connect("row-activated", self._on_row_dubbelklik)
+
         for i, label in enumerate(OVERZICHT_LABELS):
             renderer = Gtk.CellRendererText()
             column = Gtk.TreeViewColumn(label, renderer, text=i)
             column.set_sort_column_id(i)
             column.set_resizable(True)
             self.tree_view.append_column(column)
-        
+
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scrolled.add(self.tree_view)
         self.pack_start(scrolled, True, True, 0)
-        
+
         # Actie-knoppen
         actie_row = Gtk.Box(spacing=5)
         self.bewerk_btn = Gtk.Button(label="✏️ Bewerken")
         self.bewerk_btn.connect("clicked", self._on_bewerken)
         actie_row.pack_start(self.bewerk_btn, False, False, 0)
-        
+
         self.verwijder_btn = Gtk.Button(label="🗑️ Verwijderen")
         self.verwijder_btn.connect("clicked", self._on_verwijderen)
         actie_row.pack_start(self.verwijder_btn, False, False, 0)
-        
+
         self.online_btn = Gtk.Button(label="🌐 Markeer als online")
         self.online_btn.connect("clicked", self._on_markeer_online)
         actie_row.pack_start(self.online_btn, False, False, 0)
-        
+
         self.verkocht_btn = Gtk.Button(label="💰 Markeer als verkocht")
         self.verkocht_btn.connect("clicked", self._on_markeer_verkocht)
         actie_row.pack_start(self.verkocht_btn, False, False, 0)
-        
+
         self.pack_start(actie_row, False, False, 0)
-        
+
         self.omzet_label = Gtk.Label()
         self.omzet_label.set_xalign(0)
         self.pack_start(self.omzet_label, False, False, 0)
-        
+
         self.herlaad()
-    
+
     def _huidige_producten(self):
         storage = get_backend(self.config)
         try:
@@ -1312,11 +1595,11 @@ class OverzichtTab(Gtk.Box):
         except Exception as e:
             self._toon_foutdialoog(f"Kon producten niet laden: {e}")
             return []
-    
+
     def herlaad(self):
         self.store.clear()
         producten = self._huidige_producten()
-        
+
         if self.filter_offline_btn.get_active():
             producten = [p for p in producten
                          if p.get("verkocht", "nee").lower() != "ja"
@@ -1327,11 +1610,11 @@ class OverzichtTab(Gtk.Box):
                          and p.get("online", "nee").lower() == "ja"]
         elif self.filter_verkocht_btn.get_active():
             producten = [p for p in producten if p.get("verkocht", "nee").lower() == "ja"]
-        
+
         for p in producten:
             row = [p.get(col, "") for col in OVERZICHT_KOLOMMEN]
             self.store.append(row)
-        
+
         if self.filter_verkocht_btn.get_active():
             totaal = 0.0
             for p in producten:
@@ -1347,14 +1630,26 @@ class OverzichtTab(Gtk.Box):
             )
         else:
             self.omzet_label.set_text("")
-    
+
     def _geselecteerd_artikelnummer(self):
         selection = self.tree_view.get_selection()
         model, treeiter = selection.get_selected()
         if treeiter is None:
             return None
         return model[treeiter][0]
-    
+
+    def _on_row_dubbelklik(self, tree_view, path, column):
+        artikelnummer = self.store[path][0]
+        klembord = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        klembord.set_text(artikelnummer, -1)
+        klembord.store()
+        self.omzet_label.set_markup(f"<small>📋 Artikelnummer <b>{artikelnummer}</b> gekopieerd naar klembord</small>")
+        GLib.timeout_add(1500, self._herstel_omzet_label)
+
+    def _herstel_omzet_label(self):
+        self.herlaad()
+        return False  # eenmalige timeout, niet herhalen
+
     def _toon_foutdialoog(self, msg):
         dialog = Gtk.MessageDialog(
             transient_for=self.main_window, flags=0,
@@ -1362,20 +1657,20 @@ class OverzichtTab(Gtk.Box):
         )
         dialog.run()
         dialog.destroy()
-    
+
     def _on_bewerken(self, widget):
         artikelnummer = self._geselecteerd_artikelnummer()
         if not artikelnummer:
             self._toon_foutdialoog("Selecteer eerst een product.")
             return
-        
+
         storage = get_backend(self.config)
         producten = storage.load_products()
         product = next((p for p in producten if p.get("artikelnummer") == artikelnummer), None)
         if not product:
             self._toon_foutdialoog("Product niet gevonden.")
             return
-        
+
         dialog = BewerkDialog(self.main_window, product)
         response = dialog.run()
         if response == Gtk.ResponseType.OK:
@@ -1386,19 +1681,19 @@ class OverzichtTab(Gtk.Box):
             except Exception as e:
                 self._toon_foutdialoog(f"Kon niet opslaan: {e}")
         dialog.destroy()
-    
+
     def _on_verwijderen(self, widget):
         artikelnummer = self._geselecteerd_artikelnummer()
         if not artikelnummer:
             self._toon_foutdialoog("Selecteer eerst een product.")
             return
-        
+
         storage = get_backend(self.config)
         producten = storage.load_products()
         product = next((p for p in producten if p.get("artikelnummer") == artikelnummer), None)
         folder = product.get("folder_locatie", "").strip() if product else ""
         folder_bestaat = bool(folder) and os.path.isdir(folder)
-        
+
         confirm = Gtk.MessageDialog(
             transient_for=self.main_window, flags=0,
             message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.YES_NO,
@@ -1410,14 +1705,14 @@ class OverzichtTab(Gtk.Box):
             confirm.format_secondary_text("Geen (bestaande) productmap gevonden om te verplaatsen.")
         response = confirm.run()
         confirm.destroy()
-        
+
         if response == Gtk.ResponseType.YES:
             try:
                 storage.delete_product(artikelnummer)
             except Exception as e:
                 self._toon_foutdialoog(f"Kon niet verwijderen: {e}")
                 return
-            
+
             if folder_bestaat:
                 try:
                     from send2trash import send2trash
@@ -1433,31 +1728,31 @@ class OverzichtTab(Gtk.Box):
                         f"Product is verwijderd uit de opslag, maar de map kon niet naar "
                         f"de prullenbak worden verplaatst: {e}"
                     )
-            
+
             self.herlaad()
-    
+
     def _on_markeer_online(self, widget):
         artikelnummer = self._geselecteerd_artikelnummer()
         if not artikelnummer:
             self._toon_foutdialoog("Selecteer eerst een product.")
             return
-        
+
         dialog = Gtk.Dialog(title="Markeer als online", transient_for=self.main_window, flags=0)
         dialog.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
         box = dialog.get_content_area()
         box.set_spacing(8)
         box.set_border_width(10)
-        
+
         box.pack_start(Gtk.Label(label=f"Advertentie-URL voor {artikelnummer} (optioneel):"), False, False, 0)
         url_entry = Gtk.Entry()
         url_entry.set_placeholder_text("https://www.marktplaats.nl/v/...")
         box.pack_start(url_entry, False, False, 0)
-        
+
         dialog.show_all()
         response = dialog.run()
         url = url_entry.get_text().strip()
         dialog.destroy()
-        
+
         if response == Gtk.ResponseType.OK:
             storage = get_backend(self.config)
             producten = storage.load_products()
@@ -1473,32 +1768,32 @@ class OverzichtTab(Gtk.Box):
                 self.herlaad()
             except Exception as e:
                 self._toon_foutdialoog(f"Kon niet opslaan: {e}")
-    
+
     def _on_markeer_verkocht(self, widget):
         artikelnummer = self._geselecteerd_artikelnummer()
         if not artikelnummer:
             self._toon_foutdialoog("Selecteer eerst een product.")
             return
-        
+
         dialog = VerkochtDialog(self.main_window, artikelnummer)
         response = dialog.run()
         gegevens = dialog.get_gegevens() if response == Gtk.ResponseType.OK else None
         dialog.destroy()
-        
+
         if gegevens is None:
             return
-        
+
         if not gegevens["verkoopprijs"]:
             self._toon_foutdialoog("Vul een verkoopprijs in.")
             return
-        
+
         storage = get_backend(self.config)
         producten = storage.load_products()
         product = next((p for p in producten if p.get("artikelnummer") == artikelnummer), None)
         if not product:
             self._toon_foutdialoog("Product niet gevonden.")
             return
-        
+
         product["verkocht"] = "ja"
         product.update(gegevens)
         try:
@@ -1515,22 +1810,22 @@ class VerkochtDialog(Gtk.Dialog):
         super().__init__(title=f"Markeer als verkocht - {artikelnummer}", transient_for=parent, flags=0)
         self.set_default_size(420, 380)
         self.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
-        
+
         box = self.get_content_area()
         box.set_spacing(8)
         box.set_border_width(12)
-        
+
         box.pack_start(Gtk.Label(label=f"Verkoopprijs voor {artikelnummer}:", xalign=0), False, False, 0)
         self.prijs_entry = Gtk.Entry()
         self.prijs_entry.set_placeholder_text("bijv. 45.00")
         box.pack_start(self.prijs_entry, False, False, 0)
-        
+
         vandaag = datetime.date.today().isoformat()
         box.pack_start(Gtk.Label(label=f"Verkoopdatum: {vandaag} (automatisch)", xalign=0), False, False, 0)
         self.vandaag = vandaag
-        
+
         box.pack_start(Gtk.Separator(), False, False, 6)
-        
+
         box.pack_start(self._bold_label("Leverwijze"), False, False, 0)
         lever_row = Gtk.Box(spacing=10)
         self.ophalen_btn = Gtk.RadioButton.new_with_label_from_widget(None, "Ophalen")
@@ -1539,52 +1834,52 @@ class VerkochtDialog(Gtk.Dialog):
         lever_row.pack_start(self.ophalen_btn, False, False, 0)
         lever_row.pack_start(self.verzenden_btn, False, False, 0)
         box.pack_start(lever_row, False, False, 0)
-        
+
         box.pack_start(Gtk.Label(label="Marktplaatsnaam koper:", xalign=0), False, False, 0)
         self.klant_naam_entry = Gtk.Entry()
         box.pack_start(self.klant_naam_entry, False, False, 0)
-        
+
         # --- Ophalen-specifieke velden ---
         self.ophalen_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.pack_start(self.ophalen_box, False, False, 0)
-        
+
         self.ophalen_box.pack_start(Gtk.Label(label="Telefoonnummer:", xalign=0), False, False, 0)
         self.telefoon_entry = Gtk.Entry()
         self.ophalen_box.pack_start(self.telefoon_entry, False, False, 0)
-        
+
         self.ophalen_box.pack_start(Gtk.Label(label="E-mail:", xalign=0), False, False, 0)
         self.email_entry = Gtk.Entry()
         self.ophalen_box.pack_start(self.email_entry, False, False, 0)
-        
+
         self.ophalen_box.pack_start(Gtk.Label(label="Afspraak (datum/tijd ophalen):", xalign=0), False, False, 0)
         self.afspraak_entry = Gtk.Entry()
         self.afspraak_entry.set_placeholder_text("bijv. zaterdag 14:00")
         self.ophalen_box.pack_start(self.afspraak_entry, False, False, 0)
-        
+
         # --- Verzenden-specifieke velden ---
         self.verzenden_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.pack_start(self.verzenden_box, False, False, 0)
-        
+
         self.verzenden_box.pack_start(Gtk.Label(label="Track & Trace-nummer (optioneel):", xalign=0), False, False, 0)
         self.track_trace_entry = Gtk.Entry()
         self.verzenden_box.pack_start(self.track_trace_entry, False, False, 0)
-        
+
         self.ophalen_btn.set_active(True)
         self._on_leverwijze_changed(self.ophalen_btn)
-        
+
         self.show_all()
-    
+
     def _bold_label(self, text):
         label = Gtk.Label()
         label.set_markup(f"<b>{text}</b>")
         label.set_xalign(0)
         return label
-    
+
     def _on_leverwijze_changed(self, widget):
         is_ophalen = self.ophalen_btn.get_active()
         self.ophalen_box.set_visible(is_ophalen)
         self.verzenden_box.set_visible(not is_ophalen)
-    
+
     def get_gegevens(self):
         leverwijze = "ophalen" if self.ophalen_btn.get_active() else "verzenden"
         gegevens = {
@@ -1613,23 +1908,23 @@ class BewerkDialog(Gtk.Dialog):
         self.product = dict(product)
         self.set_default_size(500, 600)
         self.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_SAVE, Gtk.ResponseType.OK)
-        
+
         box = self.get_content_area()
         box.set_spacing(8)
         box.set_border_width(10)
-        
+
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         box.pack_start(scrolled, True, True, 0)
-        
+
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         inner.set_border_width(5)
         scrolled.add(inner)
-        
+
         self.entries = {}
         # artikelnummer niet bewerkbaar (is de sleutel)
         inner.pack_start(Gtk.Label(label=f"Artikelnummer: {self.product.get('artikelnummer', '')}"), False, False, 0)
-        
+
         bewerkbare_velden = [c for c in COLUMNS if c not in ("artikelnummer", "folder_locatie")]
         for veld in bewerkbare_velden:
             label = Gtk.Label(label=veld)
@@ -1648,9 +1943,9 @@ class BewerkDialog(Gtk.Dialog):
                 entry.set_text(self.product.get(veld, ""))
                 inner.pack_start(entry, False, False, 0)
                 self.entries[veld] = entry
-        
+
         self.show_all()
-    
+
     def get_product(self):
         result = dict(self.product)
         for veld, widget in self.entries.items():
@@ -1666,46 +1961,56 @@ class BewerkDialog(Gtk.Dialog):
 # HOOFDVENSTER
 # ============================================
 class MainWindow(Gtk.Window):
-    def __init__(self):
+    def __init__(self, gebruikersnaam, user_manager):
         super().__init__(title="Marktplaats Product Manager")
         self.set_default_size(700, 800)
         self.set_position(Gtk.WindowPosition.CENTER)
-        
+
         icon_path = os.path.join(config_dir(), "icon.png")
         if os.path.exists(icon_path):
             try:
                 self.set_icon_from_file(icon_path)
             except Exception:
                 pass
-        
+
         self.config = ConfigManager()
-        
+        self.gebruikersnaam = gebruikersnaam
+        self.user_manager = user_manager
+
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.add(vbox)
-        
+
         # Menubalk met instellingen
         menu_row = Gtk.Box(spacing=5)
         menu_row.set_border_width(5)
         settings_btn = Gtk.Button(label="⚙️ Instellingen")
         settings_btn.connect("clicked", self._open_settings)
         menu_row.pack_end(settings_btn, False, False, 0)
-        
+
+        users_btn = Gtk.Button(label="👤 Gebruikers")
+        users_btn.connect("clicked", self._open_users)
+        menu_row.pack_end(users_btn, False, False, 0)
+
+        gebruiker_label = Gtk.Label()
+        gebruiker_label.set_markup(f"<small>Ingelogd als: <b>{GLib.markup_escape_text(gebruikersnaam)}</b></small>")
+        menu_row.pack_end(gebruiker_label, False, False, 10)
+
         backend_label = Gtk.Label()
         backend_label.set_markup(f"<small>Actieve opslag: <b>{self.config.get('storage_backend')}</b></small>")
         self.backend_label = backend_label
         menu_row.pack_start(backend_label, False, False, 5)
         vbox.pack_start(menu_row, False, False, 0)
-        
+
         # Tabs
         self.notebook = Gtk.Notebook()
         vbox.pack_start(self.notebook, True, True, 0)
-        
+
         self.registreer_tab = RegistreerTab(self)
         self.notebook.append_page(self.registreer_tab, Gtk.Label(label="📝 Registreren"))
-        
+
         self.overzicht_tab = OverzichtTab(self)
         self.notebook.append_page(self.overzicht_tab, Gtk.Label(label="📊 Overzicht"))
-    
+
     def _open_settings(self, widget):
         dialog = SettingsDialog(self, self.config)
         response = dialog.run()
@@ -1715,7 +2020,12 @@ class MainWindow(Gtk.Window):
             # Comboboxen in registreer-tab verversen met eventueel gewijzigde lijsten
             self._herbouw_registreer_tab()
         dialog.destroy()
-    
+
+    def _open_users(self, widget):
+        dialog = UsersDialog(self, self.user_manager, self.gebruikersnaam)
+        dialog.run()
+        dialog.destroy()
+
     def _herbouw_registreer_tab(self):
         self.notebook.remove_page(0)
         self.registreer_tab = RegistreerTab(self)
@@ -1726,7 +2036,27 @@ class MainWindow(Gtk.Window):
 def main():
     GLib.set_prgname("marktplaats_productmanager")
     apply_css()
-    win = MainWindow()
+
+    user_manager = UserManager()
+    login = LoginDialog(user_manager)
+    gebruikersnaam = None
+    while True:
+        response = login.run()
+        if response != Gtk.ResponseType.OK:
+            login.destroy()
+            return  # gebruiker heeft het inlogscherm afgesloten/geannuleerd
+        naam = login.get_naam()
+        wachtwoord = login.get_wachtwoord()
+        if not naam:
+            login.toon_fout("Vul een gebruikersnaam in.")
+            continue
+        if user_manager.controleer(naam, wachtwoord):
+            gebruikersnaam = naam
+            break
+        login.toon_fout("Onjuiste gebruikersnaam of wachtwoord.")
+    login.destroy()
+
+    win = MainWindow(gebruikersnaam, user_manager)
     win.connect("destroy", Gtk.main_quit)
     win.show_all()
     Gtk.main()
