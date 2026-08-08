@@ -13,6 +13,22 @@ sudo apt install -y python3-gi gir1.2-gtk-3.0 python3-pip
 echo "📦 Python-packages installeren (barcode, sheets-ondersteuning)..."
 pip install --break-system-packages python-barcode gspread google-auth pillow
 
+echo "📦 Printopties uitbreiden..."
+# Voor Excel export
+pip install openpyxl --break-system-packages
+
+# Voor barcode generatie (al vereist)
+pip install python-barcode pillow --break-system-packages
+
+# Voor brother_ql printer
+pip install brother_ql --break-system-packages
+
+# Excel export
+pip install openpyxl --break-system-packages
+
+# Voor prullenbak (verwijderen naar prullenbak)
+pip install Send2Trash --break-system-packages
+
 # Icoon plaatsen (als icon.png naast dit script staat)
 if [ -f "$APP_DIR/icon.png" ]; then
     echo "🖼️  Icoon gevonden, wordt gebruikt voor de snelkoppeling"
