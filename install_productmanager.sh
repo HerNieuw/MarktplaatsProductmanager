@@ -11,7 +11,7 @@ sudo apt update
 sudo apt install -y python3-gi gir1.2-gtk-3.0 python3-pip
 
 echo "📦 Python-packages installeren (barcode, sheets-ondersteuning)..."
-pip install --break-system-packages python-barcode gspread google-auth pillow
+pip install --break-system-packages python-barcode pillow
 
 echo "📦 Printopties uitbreiden..."
 # Voor Excel export
