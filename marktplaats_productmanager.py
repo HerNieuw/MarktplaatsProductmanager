@@ -386,12 +386,7 @@ class UserSettings:
 # ============================================
 class ConfigManager:
     DEFAULTS = {
-        "storage_backend": "xml",
         "xml_path": os.path.join(config_dir(), "producten.xml"),
-        "sheets": {
-            "sheet_url": "",
-            "credentials_file": os.path.join(config_dir(), "credentials.json"),
-        },
         "base_folder": os.path.expanduser("~/Documents/MarktplaatsProgramma/Producten"),
         "categorieen": DEFAULT_CATEGORIEEN,
         "tijdsperiodes": DEFAULT_TIJDSPERIODES,
@@ -518,76 +513,7 @@ class XmlBackend(StorageBackend):
         self._write_all(products)
 
 
-class SheetsBackend(StorageBackend):
-    def __init__(self, sheet_url, credentials_file):
-        self.sheet_url = sheet_url
-        self.credentials_file = credentials_file
-        self._client = None
-        self._worksheet = None
-
-    def _connect(self):
-        if self._worksheet is not None:
-            return self._worksheet
-        import gspread
-        from google.oauth2.service_account import Credentials
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ]
-        creds = Credentials.from_service_account_file(self.credentials_file, scopes=scopes)
-        self._client = gspread.authorize(creds)
-        sheet = self._client.open_by_url(self.sheet_url)
-        self._worksheet = sheet.get_worksheet(0)
-        return self._worksheet
-
-    def load_products(self):
-        ws = self._connect()
-        all_values = ws.get_all_values()
-        products = []
-        for row in all_values[1:]:
-            if not row or not row[0]:
-                continue
-            product = {}
-            for i, col in enumerate(COLUMNS):
-                product[col] = row[i] if i < len(row) else ""
-            products.append(product)
-        return products
-
-    def _product_to_row(self, product):
-        return [str(product.get(col, "")) for col in COLUMNS]
-
-    def add_product(self, product):
-        ws = self._connect()
-        ws.append_row(self._product_to_row(product))
-
-    def _find_row_number(self, ws, artikelnummer):
-        all_values = ws.get_all_values()
-        for idx, row in enumerate(all_values, start=1):
-            if row and row[0] == artikelnummer:
-                return idx
-        return None
-
-    def update_product(self, artikelnummer, product):
-        ws = self._connect()
-        row_num = self._find_row_number(ws, artikelnummer)
-        if row_num is None:
-            self.add_product(product)
-            return
-        row = self._product_to_row(product)
-        ws.update(f"A{row_num}:{chr(65 + len(COLUMNS) - 1)}{row_num}", [row])
-
-    def delete_product(self, artikelnummer):
-        ws = self._connect()
-        row_num = self._find_row_number(ws, artikelnummer)
-        if row_num is not None:
-            ws.delete_rows(row_num)
-
-
 def get_backend(config):
-    backend = config.get("storage_backend", "xml")
-    if backend == "sheets":
-        sheets_cfg = config.get("sheets", {})
-        return SheetsBackend(sheets_cfg.get("sheet_url", ""), sheets_cfg.get("credentials_file", ""))
     return XmlBackend(config.get("xml_path"))
 
 
@@ -1064,17 +990,11 @@ class SettingsDialog(Gtk.Dialog):
         inner.set_border_width(5)
         scrolled.add(inner)
 
-        # --- Opslagmethode ---
-        inner.pack_start(self._section_label("Opslagmethode (kies er één)"), False, False, 0)
-
-        self.backend_combo = Gtk.ComboBoxText()
-        self.backend_combo.append("xml", "Lokaal XML-bestand")
-        self.backend_combo.append("sheets", "Google Sheets")
-        self.backend_combo.set_active_id(config.get("storage_backend", "xml"))
-        inner.pack_start(self.backend_combo, False, False, 0)
+        # --- Opslag ---
+        inner.pack_start(self._section_label("Opslag (lokaal XML-bestand)"), False, False, 0)
 
         warning = Gtk.Label()
-        warning.set_markup("<small><i>⚠️ Zorg dat deze keuze overeenkomt met wat auto_marktplaats.py gebruikt - beide apps moeten dezelfde opslag lezen.</i></small>")
+        warning.set_markup("<small><i>⚠️ Zorg dat dit pad overeenkomt met wat marktplaats_automater_gtk.py en marktplaats_barcode_scanner.py gebruiken - alle apps moeten hetzelfde bestand lezen.</i></small>")
         warning.set_xalign(0)
         warning.set_line_wrap(True)
         inner.pack_start(warning, False, False, 0)
@@ -1083,16 +1003,6 @@ class SettingsDialog(Gtk.Dialog):
         self.xml_path_entry = Gtk.Entry()
         self.xml_path_entry.set_text(config.get("xml_path", ""))
         inner.pack_start(self.xml_path_entry, False, False, 0)
-
-        inner.pack_start(Gtk.Label(label="Google Sheets URL:"), False, False, 0)
-        self.sheet_url_entry = Gtk.Entry()
-        self.sheet_url_entry.set_text(config.get("sheets", {}).get("sheet_url", ""))
-        inner.pack_start(self.sheet_url_entry, False, False, 0)
-
-        inner.pack_start(Gtk.Label(label="credentials.json pad:"), False, False, 0)
-        self.creds_entry = Gtk.Entry()
-        self.creds_entry.set_text(config.get("sheets", {}).get("credentials_file", ""))
-        inner.pack_start(self.creds_entry, False, False, 0)
 
         inner.pack_start(Gtk.Separator(), False, False, 5)
 
@@ -1464,12 +1374,7 @@ class SettingsDialog(Gtk.Dialog):
         return [l.strip() for l in text.splitlines() if l.strip()]
 
     def apply_to_config(self):
-        self.config.set("storage_backend", self.backend_combo.get_active_id())
         self.config.set("xml_path", self.xml_path_entry.get_text().strip())
-        self.config.set("sheets", {
-            "sheet_url": self.sheet_url_entry.get_text().strip(),
-            "credentials_file": self.creds_entry.get_text().strip(),
-        })
         self.config.set("base_folder", self.base_folder_entry.get_text().strip())
         self.config.set("categorieen", self._parse_lines(self.categorieen_view))
         self.config.set("tijdsperiodes", self._parse_lines(self.tijdsperiodes_view))
@@ -3183,7 +3088,7 @@ class MainWindow(Gtk.Window):
         menu_row.pack_end(gebruiker_label, False, False, 10)
 
         backend_label = Gtk.Label()
-        backend_label.set_markup(f"<small>Actieve opslag: <b>{self.config.get('storage_backend')}</b></small>")
+        backend_label.set_markup(f"<small>Opslag: <b>XML</b> ({self.config.get('xml_path', '')})</small>")
         self.backend_label = backend_label
         menu_row.pack_start(backend_label, False, False, 5)
         vbox.pack_start(menu_row, False, False, 0)
@@ -3211,7 +3116,7 @@ class MainWindow(Gtk.Window):
         response = dialog.run()
         if response == Gtk.ResponseType.OK:
             dialog.apply_to_config()
-            self.backend_label.set_markup(f"<small>Actieve opslag: <b>{self.config.get('storage_backend')}</b></small>")
+            self.backend_label.set_markup(f"<small>Opslag: <b>XML</b> ({self.config.get('xml_path', '')})</small>")
             self._herbouw_registreer_tab()
             self.overzicht_tab._update_tree_columns()
             self.overzicht_tab.herlaad()
